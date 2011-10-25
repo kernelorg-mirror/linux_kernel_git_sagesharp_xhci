@@ -1643,7 +1643,6 @@ static int process_ctrl_td(struct xhci_hcd *xhci, struct xhci_td *td,
 		}
 		break;
 	case COMP_SHORT_TX:
-		xhci_warn(xhci, "WARN: short transfer on control ep\n");
 		if (td->urb->transfer_flags & URB_SHORT_NOT_OK)
 			*status = -EREMOTEIO;
 		else
@@ -1985,7 +1984,7 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 		xhci_dbg(xhci, "Stopped on No-op or Link TRB\n");
 		break;
 	case COMP_STALL:
-		xhci_warn(xhci, "WARN: Stalled endpoint\n");
+		xhci_dbg(xhci, "Stalled endpoint\n");
 		ep->ep_state |= EP_HALTED;
 		status = -EPIPE;
 		break;
@@ -1995,11 +1994,11 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 		break;
 	case COMP_SPLIT_ERR:
 	case COMP_TX_ERR:
-		xhci_warn(xhci, "WARN: transfer error on endpoint\n");
+		xhci_dbg(xhci, "Transfer error on endpoint\n");
 		status = -EPROTO;
 		break;
 	case COMP_BABBLE:
-		xhci_warn(xhci, "WARN: babble error on endpoint\n");
+		xhci_dbg(xhci, "Babble error on endpoint\n");
 		status = -EOVERFLOW;
 		break;
 	case COMP_DB_ERR:
@@ -2564,7 +2563,6 @@ static unsigned int count_sg_trbs_needed(struct xhci_hcd *xhci, struct urb *urb)
 	num_sgs = urb->num_sgs;
 	temp = urb->transfer_buffer_length;
 
-	xhci_dbg(xhci, "count sg list trbs: \n");
 	num_trbs = 0;
 	for_each_sg(urb->sg, sg, num_sgs, i) {
 		unsigned int previous_total_trbs = num_trbs;
@@ -2582,22 +2580,11 @@ static unsigned int count_sg_trbs_needed(struct xhci_hcd *xhci, struct urb *urb)
 			num_trbs++;
 			running_total += TRB_MAX_BUFF_SIZE;
 		}
-		xhci_dbg(xhci, " sg #%d: dma = %#llx, len = %#x (%d), num_trbs = %d\n",
-				i, (unsigned long long)sg_dma_address(sg),
-				len, len, num_trbs - previous_total_trbs);
-
 		len = min_t(int, len, temp);
 		temp -= len;
 		if (temp == 0)
 			break;
 	}
-	xhci_dbg(xhci, "\n");
-	if (!in_interrupt())
-		xhci_dbg(xhci, "ep %#x - urb len = %d, sglist used, "
-				"num_trbs = %d\n",
-				urb->ep->desc.bEndpointAddress,
-				urb->transfer_buffer_length,
-				num_trbs);
 	return num_trbs;
 }
 
@@ -2783,8 +2770,6 @@ static int queue_bulk_sg_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 	trb_buff_len = min_t(int, trb_buff_len, this_sg_len);
 	if (trb_buff_len > urb->transfer_buffer_length)
 		trb_buff_len = urb->transfer_buffer_length;
-	xhci_dbg(xhci, "First length to xfer from 1st sglist entry = %u\n",
-			trb_buff_len);
 
 	first_trb = true;
 	/* Queue the first TRB, even if it's zero-length */
@@ -2816,11 +2801,6 @@ static int queue_bulk_sg_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 		if (usb_urb_dir_in(urb))
 			field |= TRB_ISP;
 
-		xhci_dbg(xhci, " sg entry: dma = %#x, len = %#x (%d), "
-				"64KB boundary at %#x, end dma = %#x\n",
-				(unsigned int) addr, trb_buff_len, trb_buff_len,
-				(unsigned int) (addr + TRB_MAX_BUFF_SIZE) & ~(TRB_MAX_BUFF_SIZE - 1),
-				(unsigned int) addr + trb_buff_len);
 		if (TRB_MAX_BUFF_SIZE -
 				(addr & (TRB_MAX_BUFF_SIZE - 1)) < trb_buff_len) {
 			xhci_warn(xhci, "WARN: sg dma xfer crosses 64KB boundaries!\n");
@@ -2925,15 +2905,6 @@ int xhci_queue_bulk_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 		running_total += TRB_MAX_BUFF_SIZE;
 	}
 	/* FIXME: this doesn't deal with URB_ZERO_PACKET - need one more */
-
-	if (!in_interrupt())
-		xhci_dbg(xhci, "ep %#x - urb len = %#x (%d), "
-				"addr = %#llx, num_trbs = %d\n",
-				urb->ep->desc.bEndpointAddress,
-				urb->transfer_buffer_length,
-				urb->transfer_buffer_length,
-				(unsigned long long)urb->transfer_dma,
-				num_trbs);
 
 	ret = prepare_transfer(xhci, xhci->devs[slot_id],
 			ep_index, urb->stream_id,
@@ -3055,9 +3026,6 @@ int xhci_queue_ctrl_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 	if (!urb->setup_packet)
 		return -EINVAL;
 
-	if (!in_interrupt())
-		xhci_dbg(xhci, "Queueing ctrl tx for slot id %d, ep %d\n",
-				slot_id, ep_index);
 	/* 1 TRB for setup, 1 for status */
 	num_trbs = 2;
 	/*
@@ -3248,15 +3216,6 @@ static int xhci_queue_isoc_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 		xhci_dbg(xhci, "Isoc URB with zero packets?\n");
 		return -EINVAL;
 	}
-
-	if (!in_interrupt())
-		xhci_dbg(xhci, "ep %#x - urb len = %#x (%d),"
-				" addr = %#llx, num_tds = %d\n",
-				urb->ep->desc.bEndpointAddress,
-				urb->transfer_buffer_length,
-				urb->transfer_buffer_length,
-				(unsigned long long)urb->transfer_dma,
-				num_tds);
 
 	start_addr = (u64) urb->transfer_dma;
 	start_trb = &ep_ring->enqueue->generic;
