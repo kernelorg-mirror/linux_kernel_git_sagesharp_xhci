@@ -98,6 +98,8 @@ struct uas_dev_info {
 	unsigned cmd_pipe, status_pipe, data_in_pipe, data_out_pipe;
 	unsigned use_streams:1;
 	unsigned uas_sense_old:1;
+	/* Array of anchors, one for each tag. */
+	struct usb_anchor *anchors;
 };
 
 enum {
@@ -387,6 +389,12 @@ static int uas_submit_urbs(struct scsi_cmnd *cmnd,
 					struct uas_dev_info *devinfo, gfp_t gfp)
 {
 	struct uas_cmd_info *cmdinfo = (void *)&cmnd->SCp;
+	struct usb_anchor *anchor;
+
+	if (blk_rq_tagged(cmnd->request))
+		anchor = &devinfo->anchors[cmnd->request->tag];
+	else
+		anchor = &devinfo->anchors[0];
 
 	if (cmdinfo->state & ALLOC_STATUS_URB) {
 		cmdinfo->status_urb = uas_alloc_sense_urb(devinfo, gfp, cmnd,
@@ -397,9 +405,11 @@ static int uas_submit_urbs(struct scsi_cmnd *cmnd,
 	}
 
 	if (cmdinfo->state & SUBMIT_STATUS_URB) {
+		usb_anchor_urb(cmdinfo->status_urb, anchor);
 		if (usb_submit_urb(cmdinfo->status_urb, gfp)) {
 			scmd_printk(KERN_INFO, cmnd,
 					"sense urb submission failure\n");
+			usb_unanchor_urb(cmdinfo->status_urb);
 			return SCSI_MLQUEUE_DEVICE_BUSY;
 		}
 		cmdinfo->state &= ~SUBMIT_STATUS_URB;
@@ -415,9 +425,11 @@ static int uas_submit_urbs(struct scsi_cmnd *cmnd,
 	}
 
 	if (cmdinfo->state & SUBMIT_DATA_IN_URB) {
+		usb_anchor_urb(cmdinfo->data_in_urb, anchor);
 		if (usb_submit_urb(cmdinfo->data_in_urb, gfp)) {
 			scmd_printk(KERN_INFO, cmnd,
 					"data in urb submission failure\n");
+			usb_unanchor_urb(cmdinfo->data_in_urb);
 			return SCSI_MLQUEUE_DEVICE_BUSY;
 		}
 		cmdinfo->state &= ~SUBMIT_DATA_IN_URB;
@@ -433,9 +445,11 @@ static int uas_submit_urbs(struct scsi_cmnd *cmnd,
 	}
 
 	if (cmdinfo->state & SUBMIT_DATA_OUT_URB) {
+		usb_anchor_urb(cmdinfo->data_out_urb, anchor);
 		if (usb_submit_urb(cmdinfo->data_out_urb, gfp)) {
 			scmd_printk(KERN_INFO, cmnd,
 					"data out urb submission failure\n");
+			usb_unanchor_urb(cmdinfo->data_out_urb);
 			return SCSI_MLQUEUE_DEVICE_BUSY;
 		}
 		cmdinfo->state &= ~SUBMIT_DATA_OUT_URB;
@@ -450,9 +464,11 @@ static int uas_submit_urbs(struct scsi_cmnd *cmnd,
 	}
 
 	if (cmdinfo->state & SUBMIT_CMD_URB) {
+		usb_anchor_urb(cmdinfo->cmd_urb, anchor);
 		if (usb_submit_urb(cmdinfo->cmd_urb, gfp)) {
 			scmd_printk(KERN_INFO, cmnd,
 					"cmd urb submission failure\n");
+			usb_unanchor_urb(cmdinfo->cmd_urb);
 			return SCSI_MLQUEUE_DEVICE_BUSY;
 		}
 		cmdinfo->state &= ~SUBMIT_CMD_URB;
@@ -705,7 +721,7 @@ static void uas_configure_endpoints(struct uas_dev_info *devinfo)
  */
 static int uas_probe(struct usb_interface *intf, const struct usb_device_id *id)
 {
-	int result;
+	int result, i;
 	struct Scsi_Host *shost;
 	struct uas_dev_info *devinfo;
 	struct usb_device *udev = interface_to_usbdev(intf);
@@ -726,19 +742,28 @@ static int uas_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	shost->max_id = 1;
 	shost->sg_tablesize = udev->bus->sg_tablesize;
 
-	result = scsi_add_host(shost, &intf->dev);
-	if (result)
-		goto free;
-	shost->hostdata[0] = (unsigned long)devinfo;
-
 	devinfo->intf = intf;
 	devinfo->udev = udev;
 	uas_configure_endpoints(devinfo);
+	devinfo->anchors = kmalloc(sizeof(*devinfo->anchors)*devinfo->qdepth,
+			GFP_KERNEL);
+	if (!devinfo->anchors)
+		goto free;
+	for (i = 0; i < devinfo->qdepth; i++)
+		init_usb_anchor(&devinfo->anchors[i]);
+
+	result = scsi_add_host(shost, &intf->dev);
+	if (result)
+		goto free_anchors;
+	shost->hostdata[0] = (unsigned long)devinfo;
 
 	scsi_scan_host(shost);
 	usb_set_intfdata(intf, shost);
 	return result;
- free:
+
+free_anchors:
+	kfree(devinfo->anchors);
+free:
 	kfree(devinfo);
 	if (shost)
 		scsi_host_put(shost);
@@ -771,6 +796,7 @@ static void uas_disconnect(struct usb_interface *intf)
 	eps[2] = usb_pipe_endpoint(udev, devinfo->data_out_pipe);
 	usb_free_streams(intf, eps, 3, GFP_KERNEL);
 
+	kfree(devinfo->anchors);
 	kfree(devinfo);
 }
 
