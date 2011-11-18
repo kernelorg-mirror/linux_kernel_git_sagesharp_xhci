@@ -144,19 +144,19 @@ static void uas_do_work(struct work_struct *work)
 	list_replace_init(&uas_work_list, &list);
 	spin_unlock_irq(&uas_work_lock);
 
+	spin_lock_irq(&uas_work_lock);
 	list_for_each_entry_safe(cmdinfo, temp, &list, list) {
 		struct scsi_pointer *scp = (void *)cmdinfo;
 		struct scsi_cmnd *cmnd = container_of(scp,
 							struct scsi_cmnd, SCp);
 		err = uas_submit_urbs(cmnd, cmnd->device->hostdata, GFP_NOIO);
+		list_del_init(&cmdinfo->list);
 		if (err) {
-			list_del(&cmdinfo->list);
-			spin_lock_irq(&uas_work_lock);
 			list_add_tail(&cmdinfo->list, &uas_work_list);
-			spin_unlock_irq(&uas_work_lock);
 			schedule_work(&uas_work);
 		}
 	}
+	spin_unlock_irq(&uas_work_lock);
 }
 
 static void uas_sense(struct urb *urb, struct scsi_cmnd *cmnd)
@@ -501,6 +501,7 @@ static int uas_queuecommand_lck(struct scsi_cmnd *cmnd,
 
 	cmdinfo->state = ALLOC_STATUS_URB | SUBMIT_STATUS_URB |
 			ALLOC_CMD_URB | SUBMIT_CMD_URB;
+	INIT_LIST_HEAD(&cmdinfo->list);
 
 	switch (cmnd->sc_data_direction) {
 	case DMA_FROM_DEVICE:
@@ -537,11 +538,47 @@ static int uas_queuecommand_lck(struct scsi_cmnd *cmnd,
 
 static DEF_SCSI_QCMD(uas_queuecommand)
 
+static void uas_kill_tagged_urbs(struct usb_anchor *anchor,
+		struct uas_cmd_info *cmdinfo)
+{
+	usb_kill_anchored_urbs(anchor);
+
+	/* Free any URBs that weren't submitted. */
+	if (cmdinfo->state & SUBMIT_STATUS_URB) {
+		kfree(cmdinfo->status_urb->transfer_buffer);
+		usb_free_urb(cmdinfo->status_urb);
+	}
+	if (cmdinfo->state & SUBMIT_DATA_IN_URB) {
+		kfree(cmdinfo->data_in_urb->transfer_buffer);
+		usb_free_urb(cmdinfo->data_in_urb);
+	}
+	if (cmdinfo->state & SUBMIT_DATA_OUT_URB) {
+		kfree(cmdinfo->data_out_urb->transfer_buffer);
+		usb_free_urb(cmdinfo->data_out_urb);
+	}
+	if (cmdinfo->state & SUBMIT_CMD_URB) {
+		kfree(cmdinfo->cmd_urb->transfer_buffer);
+		usb_free_urb(cmdinfo->cmd_urb);
+	}
+}
+
 static int uas_eh_abort_handler(struct scsi_cmnd *cmnd)
 {
 	struct scsi_device *sdev = cmnd->device;
+	struct uas_dev_info *devinfo = sdev->hostdata;
+	struct uas_cmd_info *cmdinfo = (void *)&cmnd->SCp;
+
 	sdev_printk(KERN_INFO, sdev, "%s tag %d\n", __func__,
 							cmnd->request->tag);
+	spin_lock_irq(&uas_work_lock);
+	if (!list_empty(&cmdinfo->list))
+		list_del_init(&cmdinfo->list);
+	spin_unlock_irq(&uas_work_lock);
+
+	if (blk_rq_tagged(cmnd->request))
+		uas_kill_tagged_urbs(&devinfo->anchors[cmnd->request->tag], cmdinfo);
+	else
+		uas_kill_tagged_urbs(&devinfo->anchors[0], cmdinfo);
 
 /* XXX: Send ABORT TASK Task Management command */
 	return FAILED;
