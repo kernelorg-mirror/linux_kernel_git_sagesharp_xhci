@@ -8,10 +8,12 @@
  * Distributed under the terms of the GNU GPL, version two.
  */
 
+#include <linux/bitops.h>
 #include <linux/blkdev.h>
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/module.h>
+#include <linux/srcu.h>
 #include <linux/usb.h>
 #include <linux/usb/storage.h>
 
@@ -127,10 +129,12 @@ enum {
 struct uas_dev_info {
 	struct usb_interface *intf;
 	struct usb_device *udev;
+	struct srcu_struct *srcu;
 	int qdepth;
 	unsigned cmd_pipe, status_pipe, data_in_pipe, data_out_pipe;
 	unsigned use_streams:1;
 	unsigned uas_sense_old:1;
+	atomic_t resetting;
 	/* Array of anchors, one for each tag. */
 	struct usb_anchor *anchors;
 };
@@ -246,11 +250,17 @@ static void uas_sense_old(struct urb *urb, struct scsi_cmnd *cmnd)
 	usb_free_urb(urb);
 }
 
-static void uas_xfer_data(struct urb *urb, struct scsi_cmnd *cmnd,
-							unsigned direction)
+static int uas_xfer_data(struct urb *urb, struct scsi_cmnd *cmnd,
+		struct uas_dev_info *devinfo, unsigned direction)
 {
 	struct uas_cmd_info *cmdinfo = (void *)&cmnd->SCp;
-	int err;
+	int err, srcu_idx;
+
+	srcu_idx = srcu_read_lock(devinfo->srcu);
+	if (atomic_read(&devinfo->resetting)) {
+		srcu_read_unlock(devinfo->srcu, srcu_idx);
+		return -ENODEV;
+	}
 
 	cmdinfo->state = direction | SUBMIT_STATUS_URB;
 	err = uas_submit_urbs(cmnd, cmnd->device->hostdata, GFP_ATOMIC);
@@ -260,6 +270,8 @@ static void uas_xfer_data(struct urb *urb, struct scsi_cmnd *cmnd,
 		spin_unlock(&uas_work_lock);
 		schedule_work(&uas_work);
 	}
+	srcu_read_unlock(devinfo->srcu, srcu_idx);
+	return 0;
 }
 
 static void uas_stat_cmplt(struct urb *urb)
@@ -269,6 +281,7 @@ static void uas_stat_cmplt(struct urb *urb)
 	struct uas_dev_info *devinfo = sdev->hostdata;
 	struct scsi_cmnd *cmnd;
 	u16 tag;
+	int ret = 0;
 
 	tag = be16_to_cpup(&iu->tag) - 1;
 	if (sdev->current_cmnd)
@@ -300,16 +313,17 @@ static void uas_stat_cmplt(struct urb *urb)
 			uas_sense(urb, cmnd);
 		break;
 	case IU_ID_READ_READY:
-		uas_xfer_data(urb, cmnd, SUBMIT_DATA_IN_URB);
+		ret = uas_xfer_data(urb, cmnd, devinfo, SUBMIT_DATA_IN_URB);
 		break;
 	case IU_ID_WRITE_READY:
-		uas_xfer_data(urb, cmnd, SUBMIT_DATA_OUT_URB);
+		ret = uas_xfer_data(urb, cmnd, devinfo, SUBMIT_DATA_OUT_URB);
 		break;
 	default:
 		scmd_printk(KERN_ERR, cmnd,
 			"Bogus IU (%d) received on status pipe\n", iu->iu_id);
 	}
-	return;
+	if (!ret)
+		return;
 
 task_abort:
 	cmnd->result = SAM_STAT_TASK_ABORTED;
@@ -516,12 +530,16 @@ static int uas_queuecommand_lck(struct scsi_cmnd *cmnd,
 	struct scsi_device *sdev = cmnd->device;
 	struct uas_dev_info *devinfo = sdev->hostdata;
 	struct uas_cmd_info *cmdinfo = (void *)&cmnd->SCp;
-	int err;
+	int err, srcu_idx;
 
 	BUILD_BUG_ON(sizeof(struct uas_cmd_info) > sizeof(struct scsi_pointer));
 
-	if (!cmdinfo->status_urb && sdev->current_cmnd)
+	srcu_idx = srcu_read_lock(devinfo->srcu);
+	if ((!cmdinfo->status_urb && sdev->current_cmnd) ||
+			atomic_read(&devinfo->resetting)) {
+		srcu_read_unlock(devinfo->srcu, srcu_idx);
 		return SCSI_MLQUEUE_DEVICE_BUSY;
+	}
 
 	if (blk_rq_tagged(cmnd->request)) {
 		cmdinfo->stream = cmnd->request->tag + 1;
@@ -558,6 +576,7 @@ static int uas_queuecommand_lck(struct scsi_cmnd *cmnd,
 		/* If we did nothing, give up now */
 		if (cmdinfo->state & SUBMIT_STATUS_URB) {
 			usb_free_urb(cmdinfo->status_urb);
+			srcu_read_unlock(devinfo->srcu, srcu_idx);
 			return SCSI_MLQUEUE_DEVICE_BUSY;
 		}
 		spin_lock(&uas_work_lock);
@@ -566,6 +585,7 @@ static int uas_queuecommand_lck(struct scsi_cmnd *cmnd,
 		schedule_work(&uas_work);
 	}
 
+	srcu_read_unlock(devinfo->srcu, srcu_idx);
 	return 0;
 }
 
@@ -691,9 +711,17 @@ static int uas_eh_abort_handler(struct scsi_cmnd *cmnd)
 	struct scsi_device *sdev = cmnd->device;
 	struct uas_dev_info *devinfo = sdev->hostdata;
 	struct uas_cmd_info *cmdinfo = (void *)&cmnd->SCp;
+	int srcu_idx;
 
 	sdev_printk(KERN_INFO, sdev, "%s tag %d\n", __func__,
 							cmnd->request->tag);
+
+	srcu_idx = srcu_read_lock(devinfo->srcu);
+	if (atomic_read(&devinfo->resetting)) {
+		srcu_read_unlock(devinfo->srcu, srcu_idx);
+		return FAILED;
+	}
+
 	spin_lock_irq(&uas_work_lock);
 	if (!list_empty(&cmdinfo->list))
 		list_del_init(&cmdinfo->list);
@@ -705,8 +733,10 @@ static int uas_eh_abort_handler(struct scsi_cmnd *cmnd)
 	 * usb_free_urb.  FIXME later.
 	 */
 	if (!(cmdinfo->state & SUBMIT_CMD_URB)) {
-		if (uas_issue_abort_task(cmnd, sdev, devinfo))
+		if (uas_issue_abort_task(cmnd, sdev, devinfo)) {
+			srcu_read_unlock(devinfo->srcu, srcu_idx);
 			return FAILED;
+		}
 	}
 
 	if (blk_rq_tagged(cmnd->request))
@@ -714,6 +744,7 @@ static int uas_eh_abort_handler(struct scsi_cmnd *cmnd)
 	else
 		uas_kill_tagged_urbs(&devinfo->anchors[0], cmdinfo);
 
+	srcu_read_unlock(devinfo->srcu, srcu_idx);
 	return SUCCESS;
 }
 
@@ -904,6 +935,7 @@ static int uas_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	if (!devinfo)
 		return -ENOMEM;
 
+	atomic_set(&devinfo->resetting, 0);
 	result = -ENOMEM;
 	shost = scsi_host_alloc(&uas_host_template, sizeof(void *));
 	if (!shost)
@@ -923,15 +955,23 @@ static int uas_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	for (i = 0; i < devinfo->qdepth; i++)
 		init_usb_anchor(&devinfo->anchors[i]);
 
+	devinfo->srcu = kmalloc(sizeof(*devinfo->srcu), GFP_KERNEL);
+	if (!devinfo->srcu)
+		goto free_anchors;
+	init_srcu_struct(devinfo->srcu);
+
 	result = scsi_add_host(shost, &intf->dev);
 	if (result)
-		goto free_anchors;
+		goto free_srcu;
 	shost->hostdata[0] = (unsigned long)devinfo;
 
 	scsi_scan_host(shost);
 	usb_set_intfdata(intf, shost);
 	return result;
 
+free_srcu:
+	cleanup_srcu_struct(devinfo->srcu);
+	kfree(devinfo->srcu);
 free_anchors:
 	kfree(devinfo->anchors);
 free:
@@ -943,13 +983,96 @@ free:
 
 static int uas_pre_reset(struct usb_interface *intf)
 {
+	int i;
+	struct usb_device *udev;
+	struct Scsi_Host *shost;
+	struct uas_dev_info *devinfo;
+	struct uas_cmd_info *cmdinfo;
+	struct uas_cmd_info *temp;
+	struct usb_host_endpoint *eps[3];
+
 /* XXX: Need to return 1 if it's not our device in error handling */
+	udev = interface_to_usbdev(intf);
+	shost = (struct Scsi_Host *) usb_get_intfdata(intf);
+	devinfo = (struct uas_dev_info *) shost->hostdata[0];
+
+	/* Synchronize with the readers of the resetting flag.
+	 *
+	 * Any currently running readers may submit URBs or schedule the
+	 * workqueue, but any future readers will see the flag and return
+	 * immediately.  Thus, when synchronize_srcu() finishes, we can stop the
+	 * workqueue safely, and flush any pending commands.
+	 *
+	 * synchronize_srcu() will run an implicit memory barrier on all CPUs,
+	 * so we're guaranteed future readers will see the flag when they grab
+	 * the srcu_read_lock().  We only need to make sure the compiler doesn't
+	 * optimize away the flag setting away by using atomic_t (which will do
+	 * the same volatile trick as ACCESS_ONCE()).
+	 */
+	atomic_set(&devinfo->resetting, 1);
+	synchronize_srcu(devinfo->srcu);
+
+	/* Stop the workqueue, and stop it from rescheduling itself. */
+	cancel_work_sync(&uas_work);
+	/* Remove any partially queued commands from the work queue */
+	list_for_each_entry_safe(cmdinfo, temp, &uas_work_list, list) {
+		struct scsi_pointer *scp = (void *)cmdinfo;
+		struct scsi_cmnd *cmnd = container_of(scp,
+							struct scsi_cmnd, SCp);
+		if (blk_rq_tagged(cmnd->request))
+			uas_kill_tagged_urbs(
+					&devinfo->anchors[cmnd->request->tag],
+					cmdinfo);
+		else
+			uas_kill_tagged_urbs(
+					&devinfo->anchors[0],
+					cmdinfo);
+		list_del_init(&cmdinfo->list);
+	}
+
+	/* Kill any commands that were fully queued. */
+	for (i = 0; i < devinfo->qdepth; i++)
+		usb_kill_anchored_urbs(&devinfo->anchors[i]);
+
+	/* Free streams. */
+	eps[0] = usb_pipe_endpoint(udev, devinfo->status_pipe);
+	eps[1] = usb_pipe_endpoint(udev, devinfo->data_in_pipe);
+	eps[2] = usb_pipe_endpoint(udev, devinfo->data_out_pipe);
+	usb_free_streams(intf, eps, 3, GFP_KERNEL);
+
 	return 0;
 }
 
 static int uas_post_reset(struct usb_interface *intf)
 {
+	struct Scsi_Host *shost;
+	struct uas_dev_info *devinfo;
+	int qdepth;
+
+	shost = (struct Scsi_Host *) usb_get_intfdata(intf);
+	devinfo = (struct uas_dev_info *) shost->hostdata[0];
 /* XXX: Need to return 1 if it's not our device in error handling */
+	/* Set the correct alt setting and re-allocate streams.
+	 * The USB core will disconnect and re-probe if the descriptors
+	 * (including the SS endpoint companion descriptors) change.
+	 * So qdepth should be the same, unless the xHCI driver failed to
+	 * allocate streams.  Disconnect and re-probe in that case.
+	 */
+	qdepth = devinfo->qdepth;
+	uas_configure_endpoints(devinfo);
+	if (qdepth != devinfo->qdepth)
+		return -ENODEV;
+
+	/* Make sure that the CPU doesn't reorder writes such that clearing the
+	 * reset flag happens before setting up the streams
+	 */
+	smp_wmb();
+	atomic_set(&devinfo->resetting, 0);
+	/* Make sure that all future readers will see the cleared flag before
+	 * returning from post-reset.  Otherwise the SCSI core could schedule a
+	 * command queue on a separate CPU where the flag might be stale.
+	 */
+	synchronize_srcu(devinfo->srcu);
 	return 0;
 }
 
@@ -967,6 +1090,8 @@ static void uas_disconnect(struct usb_interface *intf)
 	eps[2] = usb_pipe_endpoint(udev, devinfo->data_out_pipe);
 	usb_free_streams(intf, eps, 3, GFP_KERNEL);
 
+	cleanup_srcu_struct(devinfo->srcu);
+	kfree(devinfo->srcu);
 	kfree(devinfo->anchors);
 	kfree(devinfo);
 }
