@@ -235,18 +235,22 @@ static void uas_stat_cmplt(struct urb *urb)
 	struct scsi_cmnd *cmnd;
 	u16 tag;
 
-	if (urb->status) {
-		dev_err(&urb->dev->dev, "URB BAD STATUS %d\n", urb->status);
-		usb_free_urb(urb);
-		return;
-	}
-
 	tag = be16_to_cpup(&iu->tag) - 1;
 	if (sdev->current_cmnd)
 		cmnd = sdev->current_cmnd;
 	else
 		cmnd = scsi_find_tag(sdev, tag);
 	if (!cmnd) {
+		usb_free_urb(urb);
+		return;
+	}
+
+	/* If the URB was canceled (by either SCSI layer or reset device). */
+	if (urb->status == -ECONNRESET || urb->status == -ENOENT)
+		goto task_abort;
+	/* FIXME: handle other URB error cases too */
+	if (urb->status) {
+		dev_err(&urb->dev->dev, "URB BAD STATUS %d\n", urb->status);
 		usb_free_urb(urb);
 		return;
 	}
@@ -270,6 +274,15 @@ static void uas_stat_cmplt(struct urb *urb)
 		scmd_printk(KERN_ERR, cmnd,
 			"Bogus IU (%d) received on status pipe\n", iu->iu_id);
 	}
+	return;
+
+task_abort:
+	cmnd->result = SAM_STAT_TASK_ABORTED;
+	if (sdev->current_cmnd)
+		sdev->current_cmnd = NULL;
+	cmnd->scsi_done(cmnd);
+	usb_free_urb(urb);
+	return;
 }
 
 static void uas_data_cmplt(struct urb *urb)
