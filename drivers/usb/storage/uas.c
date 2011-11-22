@@ -1078,17 +1078,12 @@ static int uas_post_reset(struct usb_interface *intf)
 
 static void uas_disconnect(struct usb_interface *intf)
 {
-	struct usb_device *udev = interface_to_usbdev(intf);
-	struct usb_host_endpoint *eps[3];
 	struct Scsi_Host *shost = usb_get_intfdata(intf);
 	struct uas_dev_info *devinfo = (void *)shost->hostdata[0];
 
+	/* Clean up any pending commands and free streams */
+	uas_pre_reset(intf);
 	scsi_remove_host(shost);
-
-	eps[0] = usb_pipe_endpoint(udev, devinfo->status_pipe);
-	eps[1] = usb_pipe_endpoint(udev, devinfo->data_in_pipe);
-	eps[2] = usb_pipe_endpoint(udev, devinfo->data_out_pipe);
-	usb_free_streams(intf, eps, 3, GFP_KERNEL);
 
 	cleanup_srcu_struct(devinfo->srcu);
 	kfree(devinfo->srcu);
@@ -1107,6 +1102,8 @@ static struct usb_driver uas_driver = {
 	.pre_reset = uas_pre_reset,
 	.post_reset = uas_post_reset,
 	.id_table = uas_usb_ids,
+	/* UAS needs to free URBs and streams before USB core disables eps */
+	.soft_unbind = 1,
 };
 
 static int uas_init(void)
