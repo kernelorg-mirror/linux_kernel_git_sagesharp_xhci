@@ -443,6 +443,8 @@ static int uas_submit_urbs(struct scsi_cmnd *cmnd,
 	else
 		anchor = &devinfo->anchors[0];
 
+	printk(KERN_DEBUG "UAS: submit URB for tag %u, anchor %p\n",
+			cmnd->request->tag, anchor);
 	if (cmdinfo->state & ALLOC_STATUS_URB) {
 		cmdinfo->status_urb = uas_alloc_sense_urb(devinfo, gfp, cmnd,
 							  cmdinfo->stream);
@@ -452,6 +454,8 @@ static int uas_submit_urbs(struct scsi_cmnd *cmnd,
 	}
 
 	if (cmdinfo->state & SUBMIT_STATUS_URB) {
+		printk(KERN_DEBUG "UAS: anchor status URB %p, anchor %p\n",
+				cmdinfo->status_urb, anchor);
 		usb_anchor_urb(cmdinfo->status_urb, anchor);
 		if (usb_submit_urb(cmdinfo->status_urb, gfp)) {
 			scmd_printk(KERN_INFO, cmnd,
@@ -472,6 +476,8 @@ static int uas_submit_urbs(struct scsi_cmnd *cmnd,
 	}
 
 	if (cmdinfo->state & SUBMIT_DATA_IN_URB) {
+		printk(KERN_DEBUG "UAS: anchor data IN URB %p, anchor %p\n",
+				cmdinfo->data_in_urb, anchor);
 		usb_anchor_urb(cmdinfo->data_in_urb, anchor);
 		if (usb_submit_urb(cmdinfo->data_in_urb, gfp)) {
 			scmd_printk(KERN_INFO, cmnd,
@@ -492,6 +498,8 @@ static int uas_submit_urbs(struct scsi_cmnd *cmnd,
 	}
 
 	if (cmdinfo->state & SUBMIT_DATA_OUT_URB) {
+		printk(KERN_DEBUG "UAS: anchor data OUT URB %p, anchor %p\n",
+				cmdinfo->data_out_urb, anchor);
 		usb_anchor_urb(cmdinfo->data_out_urb, anchor);
 		if (usb_submit_urb(cmdinfo->data_out_urb, gfp)) {
 			scmd_printk(KERN_INFO, cmnd,
@@ -511,6 +519,8 @@ static int uas_submit_urbs(struct scsi_cmnd *cmnd,
 	}
 
 	if (cmdinfo->state & SUBMIT_CMD_URB) {
+		printk(KERN_DEBUG "UAS: anchor cmd URB %p, anchor %p\n",
+				cmdinfo->cmd_urb, anchor);
 		usb_anchor_urb(cmdinfo->cmd_urb, anchor);
 		if (usb_submit_urb(cmdinfo->cmd_urb, gfp)) {
 			scmd_printk(KERN_INFO, cmnd,
@@ -937,6 +947,7 @@ static int uas_probe(struct usb_interface *intf, const struct usb_device_id *id)
 
 	atomic_set(&devinfo->resetting, 0);
 	result = -ENOMEM;
+	printk(KERN_DEBUG "UAS: scsi host alloc\n");
 	shost = scsi_host_alloc(&uas_host_template, sizeof(void *));
 	if (!shost)
 		goto free;
@@ -954,6 +965,7 @@ static int uas_probe(struct usb_interface *intf, const struct usb_device_id *id)
 		goto free;
 	for (i = 0; i < devinfo->qdepth; i++)
 		init_usb_anchor(&devinfo->anchors[i]);
+	printk(KERN_DEBUG "UAS: anchors allocated\n");
 
 	devinfo->srcu = kmalloc(sizeof(*devinfo->srcu), GFP_KERNEL);
 	if (!devinfo->srcu)
