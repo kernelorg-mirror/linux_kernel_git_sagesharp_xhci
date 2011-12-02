@@ -38,6 +38,28 @@ enum {
 	IU_ID_WRITE_READY	= 0x07,
 };
 
+enum {
+	IU_FUNC_ABORT_TASK	= 0x01,
+	IU_FUNC_ABORT_TASK_SET	= 0x02,
+	IU_FUNC_CLEAR_TASK_SET	= 0x04,
+	IU_FUNC_LOG_UNIT_RESET	= 0x08,
+	IU_FUNC_I_T_NEXUS_RESET	= 0x10,
+	IU_FUNC_CLEAR_ACA	= 0x40,
+	IU_FUNC_QUERY_TASK	= 0x80,
+	IU_FUNC_QUERY_TASK_SET	= 0x81,
+	IU_FUNC_QUERY_ASYNC_EVT	= 0x82,
+};
+
+struct task_iu {
+	__u8 iu_id;
+	__u8 rsvd1;
+	__be16 tag;
+	__u8 function;
+	__u8 rsvd5;
+	__be16 managed_tag;
+	struct scsi_lun lun;
+};
+
 struct command_iu {
 	__u8 iu_id;
 	__u8 rsvd1;
@@ -78,6 +100,17 @@ struct sense_iu_old {
 	__u8 service_response;
 	__u8 sense[SCSI_SENSE_BUFFERSIZE];
 };
+
+struct response_iu {
+	__u8 iu_id;
+	__u8 rsvd1;
+	__be16 tag;
+	__u8 info[3];
+	__u8 code;
+};
+
+#define UAS_TASK_COMPLETE	0x00
+#define UAS_TASK_SUCCESS	0x08
 
 enum {
 	CMD_PIPE_ID		= 1,
@@ -562,6 +595,97 @@ static void uas_kill_tagged_urbs(struct usb_anchor *anchor,
 	}
 }
 
+static int uas_issue_abort_task(struct scsi_cmnd *cmnd,
+		struct scsi_device *sdev, struct uas_dev_info *devinfo)
+{
+	struct task_iu *tiu = NULL;
+	struct response_iu *riu = NULL;
+	struct urb *task_urb = NULL;
+	struct urb *response_urb = NULL;
+	int timeleft, ret;
+
+	ret = -ENOMEM;
+	task_urb = usb_alloc_urb(0, GFP_NOIO);
+	if (!task_urb)
+		goto out;
+	tiu = kzalloc(sizeof(*tiu), GFP_NOIO);
+	if (!tiu)
+		goto out;
+	response_urb = usb_alloc_urb(0, GFP_NOIO);
+	if (!response_urb)
+		goto out;
+	riu = kzalloc(sizeof(*riu), GFP_NOIO);
+	if (!riu)
+		goto out;
+
+	ret = -ETIMEDOUT;
+	sdev_printk(KERN_INFO, sdev,
+			"%s tag %d issuing ABORT TASK with tag %d\n",
+			__func__, cmnd->request->tag, devinfo->qdepth);
+
+	usb_fill_bulk_urb(response_urb, devinfo->udev, devinfo->status_pipe,
+			riu, sizeof(*riu), usb_free_urb, cmnd->device);
+	response_urb->stream_id = devinfo->qdepth;
+	/* Don't set URB_FREE_BUFFER so we can read the response */
+
+	if (usb_submit_urb(response_urb, GFP_NOIO))
+		goto out;
+	usb_anchor_urb(response_urb, &devinfo->anchors[devinfo->qdepth - 1]);
+	response_urb = NULL;
+
+	tiu->iu_id = IU_ID_TASK_MGMT;
+	/* Use tag we reserved when we set scsi queue length short */
+	tiu->tag = cpu_to_be16(devinfo->qdepth);
+	tiu->function = IU_FUNC_ABORT_TASK;
+	if (blk_rq_tagged(cmnd->request))
+		tiu->managed_tag = cpu_to_be16(cmnd->request->tag + 1);
+	else
+		tiu->managed_tag = cpu_to_be16(1);
+	int_to_scsilun(sdev->lun, &tiu->lun);
+	usb_fill_bulk_urb(task_urb, devinfo->udev, devinfo->cmd_pipe, tiu,
+			sizeof(*tiu), usb_free_urb, NULL);
+	task_urb->transfer_flags |= URB_FREE_BUFFER;
+
+	if (usb_submit_urb(task_urb, GFP_NOIO)) {
+		usb_kill_anchored_urbs(&devinfo->anchors[devinfo->qdepth - 1]);
+		goto out;
+	}
+	usb_anchor_urb(task_urb, &devinfo->anchors[devinfo->qdepth - 1]);
+	task_urb = NULL;
+	tiu = NULL;
+
+	/* Wait a whole second for the ABORT TASK to complete */
+	timeleft = usb_wait_anchor_empty_timeout(
+			&devinfo->anchors[devinfo->qdepth - 1],
+			1000);
+	if (!timeleft) {
+		sdev_printk(KERN_INFO, sdev,
+				"%s tag %d ABORT TASK timed out\n",
+				__func__, cmnd->request->tag);
+		usb_kill_anchored_urbs(&devinfo->anchors[devinfo->qdepth - 1]);
+		goto out;
+	}
+
+	if (be16_to_cpu(riu->code) != UAS_TASK_SUCCESS &&
+			be16_to_cpu(riu->code) != UAS_TASK_COMPLETE) {
+		sdev_printk(KERN_INFO, sdev,
+				"%s tag %d ABORT TASK failed, code 0x%x\n",
+				__func__, cmnd->request->tag,
+				be16_to_cpu(riu->code));
+	} else {
+		sdev_printk(KERN_INFO, sdev, "%s tag %d ABORT TASK success\n",
+				__func__, cmnd->request->tag);
+		ret = 0;
+	}
+
+out:
+	kfree(tiu);
+	usb_free_urb(task_urb);
+	kfree(riu);
+	usb_free_urb(response_urb);
+	return ret;
+}
+
 static int uas_eh_abort_handler(struct scsi_cmnd *cmnd)
 {
 	struct scsi_device *sdev = cmnd->device;
@@ -575,13 +699,22 @@ static int uas_eh_abort_handler(struct scsi_cmnd *cmnd)
 		list_del_init(&cmdinfo->list);
 	spin_unlock_irq(&uas_work_lock);
 
+	/* Send ABORT TASK Task Management command if we sent the command IU.
+	 * XXX: we don't know if the command IU didn't make it because of an
+	 * error (like electrical noise), since the completion function is
+	 * usb_free_urb.  FIXME later.
+	 */
+	if (!(cmdinfo->state & SUBMIT_CMD_URB)) {
+		if (uas_issue_abort_task(cmnd, sdev, devinfo))
+			return FAILED;
+	}
+
 	if (blk_rq_tagged(cmnd->request))
 		uas_kill_tagged_urbs(&devinfo->anchors[cmnd->request->tag], cmdinfo);
 	else
 		uas_kill_tagged_urbs(&devinfo->anchors[0], cmdinfo);
 
-/* XXX: Send ABORT TASK Task Management command */
-	return FAILED;
+	return SUCCESS;
 }
 
 static int uas_eh_device_reset_handler(struct scsi_cmnd *cmnd)
@@ -631,7 +764,8 @@ static int uas_slave_configure(struct scsi_device *sdev)
 {
 	struct uas_dev_info *devinfo = sdev->hostdata;
 	scsi_set_tag_type(sdev, MSG_ORDERED_TAG);
-	scsi_activate_tcq(sdev, devinfo->qdepth - 1);
+	/* Tag 0 is reserved; reserve another for command abort task IU */
+	scsi_activate_tcq(sdev, devinfo->qdepth - 2);
 	return 0;
 }
 
