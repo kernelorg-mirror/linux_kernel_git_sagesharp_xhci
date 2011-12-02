@@ -186,7 +186,7 @@ static void uas_do_work(struct work_struct *work)
 		struct scsi_pointer *scp = (void *)cmdinfo;
 		struct scsi_cmnd *cmnd = container_of(scp,
 							struct scsi_cmnd, SCp);
-		err = uas_submit_urbs(cmnd, cmnd->device->hostdata, GFP_NOIO);
+		err = uas_submit_urbs(cmnd, cmnd->device->hostdata, GFP_ATOMIC);
 		list_del_init(&cmdinfo->list);
 		if (err) {
 			list_add_tail(&cmdinfo->list, &uas_work_list);
