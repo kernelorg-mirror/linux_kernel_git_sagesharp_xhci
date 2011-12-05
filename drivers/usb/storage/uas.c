@@ -1093,14 +1093,15 @@ static void uas_disconnect(struct usb_interface *intf)
 	struct Scsi_Host *shost = usb_get_intfdata(intf);
 	struct uas_dev_info *devinfo = (void *)shost->hostdata[0];
 
+	scsi_remove_host(shost);
 	/* Clean up any pending commands and free streams */
 	uas_pre_reset(intf);
-	scsi_remove_host(shost);
 
 	cleanup_srcu_struct(devinfo->srcu);
 	kfree(devinfo->srcu);
 	kfree(devinfo->anchors);
 	kfree(devinfo);
+	scsi_host_put(shost);
 }
 
 /*
