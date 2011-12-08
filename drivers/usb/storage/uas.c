@@ -129,7 +129,7 @@ enum {
 struct uas_dev_info {
 	struct usb_interface *intf;
 	struct usb_device *udev;
-	struct srcu_struct *srcu;
+	struct srcu_struct srcu;
 	int qdepth;
 	unsigned cmd_pipe, status_pipe, data_in_pipe, data_out_pipe;
 	unsigned use_streams:1;
@@ -256,9 +256,9 @@ static int uas_xfer_data(struct urb *urb, struct scsi_cmnd *cmnd,
 	struct uas_cmd_info *cmdinfo = (void *)&cmnd->SCp;
 	int err, srcu_idx;
 
-	srcu_idx = srcu_read_lock(devinfo->srcu);
+	srcu_idx = srcu_read_lock(&devinfo->srcu);
 	if (atomic_read(&devinfo->resetting)) {
-		srcu_read_unlock(devinfo->srcu, srcu_idx);
+		srcu_read_unlock(&devinfo->srcu, srcu_idx);
 		return -ENODEV;
 	}
 
@@ -270,7 +270,7 @@ static int uas_xfer_data(struct urb *urb, struct scsi_cmnd *cmnd,
 		spin_unlock(&uas_work_lock);
 		schedule_work(&uas_work);
 	}
-	srcu_read_unlock(devinfo->srcu, srcu_idx);
+	srcu_read_unlock(&devinfo->srcu, srcu_idx);
 	return 0;
 }
 
@@ -544,10 +544,10 @@ static int uas_queuecommand_lck(struct scsi_cmnd *cmnd,
 
 	BUILD_BUG_ON(sizeof(struct uas_cmd_info) > sizeof(struct scsi_pointer));
 
-	srcu_idx = srcu_read_lock(devinfo->srcu);
+	srcu_idx = srcu_read_lock(&devinfo->srcu);
 	if ((!cmdinfo->status_urb && sdev->current_cmnd) ||
 			atomic_read(&devinfo->resetting)) {
-		srcu_read_unlock(devinfo->srcu, srcu_idx);
+		srcu_read_unlock(&devinfo->srcu, srcu_idx);
 		return SCSI_MLQUEUE_DEVICE_BUSY;
 	}
 
@@ -586,7 +586,7 @@ static int uas_queuecommand_lck(struct scsi_cmnd *cmnd,
 		/* If we did nothing, give up now */
 		if (cmdinfo->state & SUBMIT_STATUS_URB) {
 			usb_free_urb(cmdinfo->status_urb);
-			srcu_read_unlock(devinfo->srcu, srcu_idx);
+			srcu_read_unlock(&devinfo->srcu, srcu_idx);
 			return SCSI_MLQUEUE_DEVICE_BUSY;
 		}
 		spin_lock(&uas_work_lock);
@@ -595,7 +595,7 @@ static int uas_queuecommand_lck(struct scsi_cmnd *cmnd,
 		schedule_work(&uas_work);
 	}
 
-	srcu_read_unlock(devinfo->srcu, srcu_idx);
+	srcu_read_unlock(&devinfo->srcu, srcu_idx);
 	return 0;
 }
 
@@ -726,9 +726,9 @@ static int uas_eh_abort_handler(struct scsi_cmnd *cmnd)
 	sdev_printk(KERN_INFO, sdev, "%s tag %d\n", __func__,
 							cmnd->request->tag);
 
-	srcu_idx = srcu_read_lock(devinfo->srcu);
+	srcu_idx = srcu_read_lock(&devinfo->srcu);
 	if (atomic_read(&devinfo->resetting)) {
-		srcu_read_unlock(devinfo->srcu, srcu_idx);
+		srcu_read_unlock(&devinfo->srcu, srcu_idx);
 		return FAILED;
 	}
 
@@ -744,7 +744,7 @@ static int uas_eh_abort_handler(struct scsi_cmnd *cmnd)
 	 */
 	if (!(cmdinfo->state & SUBMIT_CMD_URB)) {
 		if (uas_issue_abort_task(cmnd, sdev, devinfo)) {
-			srcu_read_unlock(devinfo->srcu, srcu_idx);
+			srcu_read_unlock(&devinfo->srcu, srcu_idx);
 			return FAILED;
 		}
 	}
@@ -754,7 +754,7 @@ static int uas_eh_abort_handler(struct scsi_cmnd *cmnd)
 	else
 		uas_kill_tagged_urbs(&devinfo->anchors[0], cmdinfo);
 
-	srcu_read_unlock(devinfo->srcu, srcu_idx);
+	srcu_read_unlock(&devinfo->srcu, srcu_idx);
 	return SUCCESS;
 }
 
@@ -967,10 +967,7 @@ static int uas_probe(struct usb_interface *intf, const struct usb_device_id *id)
 		init_usb_anchor(&devinfo->anchors[i]);
 	printk(KERN_DEBUG "UAS: anchors allocated\n");
 
-	devinfo->srcu = kmalloc(sizeof(*devinfo->srcu), GFP_KERNEL);
-	if (!devinfo->srcu)
-		goto free_anchors;
-	init_srcu_struct(devinfo->srcu);
+	init_srcu_struct(&devinfo->srcu);
 
 	result = scsi_add_host(shost, &intf->dev);
 	if (result)
@@ -982,9 +979,7 @@ static int uas_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	return result;
 
 free_srcu:
-	cleanup_srcu_struct(devinfo->srcu);
-	kfree(devinfo->srcu);
-free_anchors:
+	cleanup_srcu_struct(&devinfo->srcu);
 	kfree(devinfo->anchors);
 free:
 	kfree(devinfo);
@@ -1022,7 +1017,7 @@ static int uas_pre_reset(struct usb_interface *intf)
 	 * the same volatile trick as ACCESS_ONCE()).
 	 */
 	atomic_set(&devinfo->resetting, 1);
-	synchronize_srcu(devinfo->srcu);
+	synchronize_srcu(&devinfo->srcu);
 
 	/* Stop the workqueue, and stop it from rescheduling itself. */
 	cancel_work_sync(&uas_work);
@@ -1084,7 +1079,7 @@ static int uas_post_reset(struct usb_interface *intf)
 	 * returning from post-reset.  Otherwise the SCSI core could schedule a
 	 * command queue on a separate CPU where the flag might be stale.
 	 */
-	synchronize_srcu(devinfo->srcu);
+	synchronize_srcu(&devinfo->srcu);
 	return 0;
 }
 
@@ -1097,8 +1092,7 @@ static void uas_disconnect(struct usb_interface *intf)
 	/* Clean up any pending commands and free streams */
 	uas_pre_reset(intf);
 
-	cleanup_srcu_struct(devinfo->srcu);
-	kfree(devinfo->srcu);
+	cleanup_srcu_struct(&devinfo->srcu);
 	kfree(devinfo->anchors);
 	kfree(devinfo);
 	scsi_host_put(shost);
