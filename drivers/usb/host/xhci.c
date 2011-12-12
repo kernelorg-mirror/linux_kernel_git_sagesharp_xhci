@@ -1155,9 +1155,6 @@ int xhci_urb_enqueue(struct usb_hcd *hcd, struct urb *urb, gfp_t mem_flags)
 			goto dying;
 		ret = xhci_queue_ctrl_tx(xhci, GFP_ATOMIC, urb,
 				slot_id, ep_index);
-		if (ret)
-			goto free_priv;
-		spin_unlock_irqrestore(&xhci->lock, flags);
 	} else if (usb_endpoint_xfer_bulk(&urb->ep->desc)) {
 		spin_lock_irqsave(&xhci->lock, flags);
 		if (xhci->xhc_state & XHCI_STATE_DYING)
@@ -1177,28 +1174,30 @@ int xhci_urb_enqueue(struct usb_hcd *hcd, struct urb *urb, gfp_t mem_flags)
 			ret = xhci_queue_bulk_tx(xhci, GFP_ATOMIC, urb,
 					slot_id, ep_index);
 		}
-		if (ret)
-			goto free_priv;
-		spin_unlock_irqrestore(&xhci->lock, flags);
 	} else if (usb_endpoint_xfer_int(&urb->ep->desc)) {
 		spin_lock_irqsave(&xhci->lock, flags);
 		if (xhci->xhc_state & XHCI_STATE_DYING)
 			goto dying;
 		ret = xhci_queue_intr_tx(xhci, GFP_ATOMIC, urb,
 				slot_id, ep_index);
-		if (ret)
-			goto free_priv;
-		spin_unlock_irqrestore(&xhci->lock, flags);
 	} else {
 		spin_lock_irqsave(&xhci->lock, flags);
 		if (xhci->xhc_state & XHCI_STATE_DYING)
 			goto dying;
 		ret = xhci_queue_isoc_tx_prepare(xhci, GFP_ATOMIC, urb,
 				slot_id, ep_index);
-		if (ret)
-			goto free_priv;
-		spin_unlock_irqrestore(&xhci->lock, flags);
 	}
+
+	if (ret == -EBUSY)
+		/*
+		 * We're waiting for dequeue pointer walk pass link TRB and
+		 * will queue this URB later. Tell usbcore it's queued
+		 * successfully...
+		 */
+		ret = 0;
+	if (ret)
+		goto free_priv;
+	spin_unlock_irqrestore(&xhci->lock, flags);
 exit:
 	return ret;
 dying:
@@ -1296,13 +1295,39 @@ int xhci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 	unsigned int ep_index;
 	struct xhci_ring *ep_ring;
 	struct xhci_virt_ep *ep;
+	struct xhci_pending_urb *curr, *next;
 
 	xhci = hcd_to_xhci(hcd);
 	spin_lock_irqsave(&xhci->lock, flags);
+
+	ep_index = xhci_get_endpoint_index(&urb->ep->desc);
+	ep = &xhci->devs[urb->dev->slot_id]->eps[ep_index];
+	ep_ring = xhci_urb_to_transfer_ring(xhci, urb);
+
 	/* Make sure the URB hasn't completed or been unlinked already */
 	ret = usb_hcd_check_unlink_urb(hcd, urb, status);
-	if (ret || !urb->hcpriv)
+	if (ret) {
+		if (!ep_ring || ep_ring->pending_num_trbs == 0 || !urb->hcpriv)
+			goto done;
+		/* Check the pending urb list */
+		list_for_each_entry_safe(curr, next,
+				&ep_ring->pending_urb_list, list) {
+			if (curr->urb == urb) {
+				xhci_urb_free_priv(xhci, curr->urb->hcpriv);
+				list_del(&curr->list);
+				spin_unlock_irqrestore(&xhci->lock, flags);
+				usb_hcd_giveback_urb(
+					bus_to_hcd(curr->urb->dev->bus),
+					curr->urb, -ESHUTDOWN);
+				list_del(&curr->list);
+				ep_ring->pending_num_trbs -= curr->num_trbs;
+				kfree(curr);
+				goto stop_ep;
+			}
+		}
 		goto done;
+	}
+
 	temp = xhci_readl(xhci, &xhci->op_regs->status);
 	if (temp == 0xffffffff || (xhci->xhc_state & XHCI_STATE_HALTED)) {
 		xhci_dbg(xhci, "HW died, freeing TD.\n");
@@ -1321,6 +1346,7 @@ int xhci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 		xhci_urb_free_priv(xhci, urb_priv);
 		return ret;
 	}
+
 	if ((xhci->xhc_state & XHCI_STATE_DYING) ||
 			(xhci->xhc_state & XHCI_STATE_HALTED)) {
 		xhci_dbg(xhci, "Ep 0x%x: URB %p to be canceled on "
@@ -1334,9 +1360,6 @@ int xhci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 		goto done;
 	}
 
-	ep_index = xhci_get_endpoint_index(&urb->ep->desc);
-	ep = &xhci->devs[urb->dev->slot_id]->eps[ep_index];
-	ep_ring = xhci_urb_to_transfer_ring(xhci, urb);
 	if (!ep_ring) {
 		ret = -EINVAL;
 		goto done;
@@ -1358,6 +1381,7 @@ int xhci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 		list_add_tail(&td->cancelled_td_list, &ep->cancelled_td_list);
 	}
 
+stop_ep:
 	/* Queue a stop endpoint command, but only if this is
 	 * the first cancellation to be handled.
 	 */

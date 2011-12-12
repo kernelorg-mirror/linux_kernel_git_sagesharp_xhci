@@ -173,6 +173,7 @@ static void xhci_initialize_ring_info(struct xhci_ring *ring,
 	 * handling ring expansion, set the cycle state equal to the old ring.
 	 */
 	ring->cycle_state = cycle_state;
+	ring->pending_num_trbs = 0;
 	/* Not necessary for new rings, but needed for re-initialized rings */
 	ring->enq_updates = 0;
 	ring->deq_updates = 0;
@@ -237,6 +238,7 @@ static struct xhci_ring *xhci_ring_alloc(struct xhci_hcd *xhci,
 
 	ring->num_segs = num_segs;
 	INIT_LIST_HEAD(&ring->td_list);
+	INIT_LIST_HEAD(&ring->pending_urb_list);
 	ring->type = type;
 	if (num_segs == 0)
 		return ring;

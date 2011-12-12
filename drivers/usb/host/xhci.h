@@ -1254,6 +1254,12 @@ struct xhci_dequeue_state {
 	int new_cycle_state;
 };
 
+struct xhci_pending_urb {
+	struct urb *urb;
+	struct list_head list;
+	unsigned int num_trbs;
+};
+
 enum xhci_ring_type {
 	TYPE_CTRL = 0,
 	TYPE_ISOC,
@@ -1274,6 +1280,7 @@ struct xhci_ring {
 	struct xhci_segment	*deq_seg;
 	unsigned int		deq_updates;
 	struct list_head	td_list;
+	struct list_head	pending_urb_list;
 	/*
 	 * Write the cycle state into the TRB cycle field to give ownership of
 	 * the TRB to the host controller (if we are the producer), or to check
@@ -1284,6 +1291,7 @@ struct xhci_ring {
 	unsigned int		num_segs;
 	unsigned int		num_trbs_free;
 	unsigned int		num_trbs_free_temp;
+	unsigned int		pending_num_trbs;
 	enum xhci_ring_type	type;
 	bool			last_td_was_short;
 };

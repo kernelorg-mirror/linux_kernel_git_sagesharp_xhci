@@ -140,6 +140,89 @@ static void next_trb(struct xhci_hcd *xhci,
 }
 
 /*
+ * Expand the ring, and queue the URBs. If failed, giveback the URB.
+ */
+static int xhci_queue_pending_urbs(struct xhci_hcd *xhci,
+					struct xhci_ring *ep_ring)
+{
+	struct xhci_pending_urb *curr, *next;
+	struct urb *urb;
+	unsigned int slot_id, ep_index;
+	int ret = 0;
+	bool expansion_failed = false;
+
+	if (ep_ring->type == TYPE_COMMAND || ep_ring->type == TYPE_EVENT)
+		return -EINVAL;
+
+	/* It's safe to expand the ring now */
+	ret = xhci_ring_expansion(xhci, ep_ring, ep_ring->pending_num_trbs,
+					GFP_ATOMIC);
+	if (ret) {
+		xhci_err(xhci, "Ring expansion failed\n");
+		goto clear;
+	}
+
+	/* Clear the pending urbs and queue them */
+	ep_ring->pending_num_trbs = 0;
+
+	list_for_each_entry_safe(curr, next, &ep_ring->pending_urb_list, list) {
+		urb = curr->urb;
+		if (!expansion_failed) {
+			slot_id = urb->dev->slot_id;
+			ep_index = xhci_get_endpoint_index(&urb->ep->desc);
+			switch (ep_ring->type) {
+			case TYPE_CTRL:
+				ret = xhci_queue_ctrl_tx(xhci, GFP_ATOMIC, urb,
+					slot_id, ep_index);
+				break;
+			case TYPE_ISOC:
+				ret = xhci_queue_isoc_tx_prepare(xhci,
+					GFP_ATOMIC, urb, slot_id, ep_index);
+				break;
+			case TYPE_BULK:
+			case TYPE_STREAM:
+				ret = xhci_queue_bulk_tx(xhci, GFP_ATOMIC, urb,
+					slot_id, ep_index);
+				break;
+			case TYPE_INTR:
+				ret = xhci_queue_intr_tx(xhci, GFP_ATOMIC, urb,
+					slot_id, ep_index);
+				break;
+			default:
+				ret = -EINVAL;
+				break;
+			}
+		}
+
+		if (!ret)
+			goto clear;
+
+		list_del(&curr->list);
+		kfree(curr);
+	}
+
+	return ret;
+
+clear:
+	/*
+	 * Ring expansion or urb submission failed. Giveback all the urbs on
+	 * the pending list...
+	 */
+	list_for_each_entry_safe(curr, next, &ep_ring->pending_urb_list, list) {
+		urb = curr->urb;
+		xhci_urb_free_priv(xhci, urb->hcpriv);
+		spin_unlock(&xhci->lock);
+		usb_hcd_giveback_urb(bus_to_hcd(urb->dev->bus), urb, -EPIPE);
+		spin_lock(&xhci->lock);
+		list_del(&curr->list);
+		kfree(curr);
+	}
+	ep_ring->pending_num_trbs = 0;
+
+	return ret;
+}
+
+/*
  * See Cycle bit rules. SW is the consumer for the event ring only.
  * Don't make a ring full of link TRBs.  That would be dumb and this would loop.
  */
@@ -167,6 +250,12 @@ static void inc_deq(struct xhci_hcd *xhci, struct xhci_ring *ring)
 		ring->deq_seg = ring->deq_seg->next;
 		ring->dequeue = ring->deq_seg->trbs;
 		next = ring->dequeue;
+		/*
+		 * If there are pending URBs, first expand the ring, and
+		 * queue the URBs.
+		 */
+		if (ring->pending_num_trbs > 0)
+			xhci_queue_pending_urbs(xhci, ring);
 	}
 	addr = (unsigned long long) xhci_trb_virt_to_dma(ring->deq_seg, ring->dequeue);
 }
@@ -607,6 +696,46 @@ static void xhci_giveback_urb_in_irq(struct xhci_hcd *xhci,
 	}
 }
 
+static void xhci_giveback_pending_urbs(struct xhci_hcd *xhci,
+		struct xhci_ring *ep_ring)
+{
+	struct xhci_pending_urb *curr, *next;
+
+	list_for_each_entry_safe(curr, next,
+			&ep_ring->pending_urb_list, list) {
+		xhci_urb_free_priv(xhci, curr->urb->hcpriv);
+		spin_unlock(&xhci->lock);
+		usb_hcd_giveback_urb(bus_to_hcd(curr->urb->dev->bus), curr->urb,
+						-ESHUTDOWN);
+		spin_lock(&xhci->lock);
+		list_del(&curr->list);
+		kfree(curr);
+	}
+	ep_ring->pending_num_trbs = 0;
+}
+
+/* Scan all the rings of the endpoint, giveback pending URBs */
+static int xhci_clear_ep_pending_urbs(struct xhci_hcd *xhci,
+		struct xhci_virt_ep *ep)
+{
+	struct xhci_ring	*ep_ring;
+	int i;
+
+	if (!(ep->ep_state & EP_HAS_STREAMS)) {
+		ep_ring = ep->ring;
+		if (ep_ring && ep_ring->pending_num_trbs > 0)
+			xhci_giveback_pending_urbs(xhci, ep_ring);
+	} else {
+		for (i = 0; i < ep->stream_info->num_streams; ++i) {
+			ep_ring = ep->stream_info->stream_rings[i];
+			if (ep_ring && ep_ring->pending_num_trbs > 0)
+				xhci_giveback_pending_urbs(xhci, ep_ring);
+		}
+	}
+
+	return 0;
+}
+
 /*
  * When we get a command completion for a Stop Endpoint Command, we need to
  * unlink any cancelled TDs from the ring.  There are two ways to do that:
@@ -832,6 +961,7 @@ void xhci_stop_endpoint_command_watchdog(unsigned long arg)
 			continue;
 		for (j = 0; j < 31; j++) {
 			temp_ep = &xhci->devs[i]->eps[j];
+			xhci_clear_ep_pending_urbs(xhci, temp_ep);
 			ring = temp_ep->ring;
 			if (!ring)
 				continue;
@@ -2406,10 +2536,10 @@ static void queue_trb(struct xhci_hcd *xhci, struct xhci_ring *ring,
 
 /*
  * Does various checks on the endpoint ring, and makes it ready to queue num_trbs.
- * FIXME allocate segments if the ring is full.
  */
 static int prepare_ring(struct xhci_hcd *xhci, struct xhci_ring *ep_ring,
-		u32 ep_state, unsigned int num_trbs, gfp_t mem_flags)
+		struct urb *urb, u32 ep_state, unsigned int num_trbs,
+		gfp_t mem_flags)
 {
 	unsigned int num_trbs_needed;
 
@@ -2450,11 +2580,28 @@ static int prepare_ring(struct xhci_hcd *xhci, struct xhci_ring *ep_ring,
 			return -ENOMEM;
 		}
 
+		/*
+		 * Waiting for dequeue pointer to walk pass the link TRB;
+		 * until then, add the URBs to the ring's URB list,
+		 * queue them later.
+		 */
 		if (ep_ring->enq_seg == ep_ring->deq_seg &&
 				ep_ring->dequeue > ep_ring->enqueue) {
-			xhci_err(xhci, "Can not expand the ring while dequeue "
-				"pointer has not passed the link TRB\n");
-			return -ENOMEM;
+			struct xhci_pending_urb *pending_urb;
+
+			xhci_dbg(xhci, "Waiting for dequeue "
+				"pointer to pass the link TRB\n");
+			pending_urb = kzalloc(sizeof(struct xhci_pending_urb),
+						mem_flags);
+			if (!pending_urb)
+				return -ENOMEM;
+			ep_ring->pending_num_trbs += num_trbs;
+			pending_urb->urb = urb;
+			pending_urb->num_trbs = num_trbs;
+			INIT_LIST_HEAD(&pending_urb->list);
+			list_add_tail(&pending_urb->list,
+					&ep_ring->pending_urb_list);
+			return -EBUSY;
 		}
 
 		xhci_dbg(xhci, "ERROR no room on ep ring, "
@@ -2522,7 +2669,23 @@ static int prepare_transfer(struct xhci_hcd *xhci,
 		return -EINVAL;
 	}
 
-	ret = prepare_ring(xhci, ep_ring,
+	if (ep_ring->pending_num_trbs > 0) {
+		struct xhci_pending_urb *pending_urb;
+
+		pending_urb = kzalloc(sizeof(struct xhci_pending_urb),
+						mem_flags);
+		if (!pending_urb)
+			return -ENOMEM;
+		xhci_dbg(xhci, "Adding urb %p to ring's pending list\n", urb);
+		ep_ring->pending_num_trbs += num_trbs;
+		pending_urb->urb = urb;
+		pending_urb->num_trbs = num_trbs;
+		INIT_LIST_HEAD(&pending_urb->list);
+		list_add_tail(&pending_urb->list, &ep_ring->pending_urb_list);
+		return -EBUSY;
+	}
+
+	ret = prepare_ring(xhci, ep_ring, urb,
 			   le32_to_cpu(ep_ctx->ep_info) & EP_STATE_MASK,
 			   num_trbs, mem_flags);
 	if (ret)
@@ -3394,8 +3557,9 @@ int xhci_queue_isoc_tx_prepare(struct xhci_hcd *xhci, gfp_t mem_flags,
 	/* Check the ring to guarantee there is enough room for the whole urb.
 	 * Do not insert any td of the urb to the ring if the check failed.
 	 */
-	ret = prepare_ring(xhci, ep_ring, le32_to_cpu(ep_ctx->ep_info) & EP_STATE_MASK,
-			   num_trbs, mem_flags);
+	ret = prepare_ring(xhci, ep_ring, urb,
+			le32_to_cpu(ep_ctx->ep_info) & EP_STATE_MASK,
+			num_trbs, mem_flags);
 	if (ret)
 		return ret;
 
@@ -3455,7 +3619,7 @@ static int queue_command(struct xhci_hcd *xhci, u32 field1, u32 field2,
 	if (!command_must_succeed)
 		reserved_trbs++;
 
-	ret = prepare_ring(xhci, xhci->cmd_ring, EP_STATE_RUNNING,
+	ret = prepare_ring(xhci, xhci->cmd_ring, NULL, EP_STATE_RUNNING,
 			reserved_trbs, GFP_ATOMIC);
 	if (ret < 0) {
 		xhci_err(xhci, "ERR: No room for command on command ring\n");
