@@ -342,7 +342,7 @@ int xhci_ring_expansion(struct xhci_hcd *xhci, struct xhci_ring *ring,
 		return -ENOMEM;
 
 	xhci_link_rings(xhci, ring, first, last, num_segs);
-	xhci_dbg(xhci, "ring expansion succeed, now has %d segments\n",
+	printk(KERN_DEBUG "ring expansion succeed, now has %d segments\n",
 			ring->num_segs);
 
 	return 0;

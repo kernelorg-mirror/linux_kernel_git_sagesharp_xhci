@@ -517,7 +517,7 @@ int xhci_run(struct usb_hcd *hcd)
 	xhci->event_ring_timer.expires = jiffies + POLL_TIMEOUT * HZ;
 	xhci->zombie = 0;
 	xhci_dbg(xhci, "Setting event ring polling timer\n");
-	add_timer(&xhci->event_ring_timer);
+	/* add_timer(&xhci->event_ring_timer); */
 #endif
 
 	xhci_dbg(xhci, "Command ring memory map follows:\n");

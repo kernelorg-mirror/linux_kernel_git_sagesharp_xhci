@@ -2589,12 +2589,15 @@ static int prepare_ring(struct xhci_hcd *xhci, struct xhci_ring *ep_ring,
 				ep_ring->dequeue > ep_ring->enqueue) {
 			struct xhci_pending_urb *pending_urb;
 
-			xhci_dbg(xhci, "Waiting for dequeue "
+			printk(KERN_DEBUG "Waiting for dequeue "
 				"pointer to pass the link TRB\n");
 			pending_urb = kzalloc(sizeof(struct xhci_pending_urb),
 						mem_flags);
-			if (!pending_urb)
+			if (!pending_urb) {
+				printk(KERN_DEBUG "Couldn't allocate "
+						"pending URB structure.\n");
 				return -ENOMEM;
+			}
 			ep_ring->pending_num_trbs += num_trbs;
 			pending_urb->urb = urb;
 			pending_urb->num_trbs = num_trbs;
@@ -2604,12 +2607,12 @@ static int prepare_ring(struct xhci_hcd *xhci, struct xhci_ring *ep_ring,
 			return -EBUSY;
 		}
 
-		xhci_dbg(xhci, "ERROR no room on ep ring, "
+		printk(KERN_DEBUG "ERROR no room on ep ring, "
 					"try ring expansion\n");
 		num_trbs_needed = num_trbs - ep_ring->num_trbs_free;
 		if (xhci_ring_expansion(xhci, ep_ring, num_trbs_needed,
 					mem_flags)) {
-			xhci_err(xhci, "Ring expansion failed\n");
+			printk(KERN_WARNING "Ring expansion failed\n");
 			return -ENOMEM;
 		}
 	};
