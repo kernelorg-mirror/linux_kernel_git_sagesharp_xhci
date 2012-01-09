@@ -1272,6 +1272,7 @@ static void hub_release(struct kref *kref)
 }
 
 static unsigned highspeed_hubs;
+static unsigned superspeed_hubs;
 
 static void hub_disconnect(struct usb_interface *intf)
 {
@@ -1295,6 +1296,8 @@ static void hub_disconnect(struct usb_interface *intf)
 
 	if (hub->hdev->speed == USB_SPEED_HIGH)
 		highspeed_hubs--;
+	if (hub->hdev->speed == USB_SPEED_SUPER)
+		superspeed_hubs--;
 
 	usb_free_urb(hub->urb);
 	kfree(hub->port_owners);
@@ -1372,6 +1375,8 @@ descriptor_error:
 
 	if (hdev->speed == USB_SPEED_HIGH)
 		highspeed_hubs++;
+	if (hub->hdev->speed == USB_SPEED_SUPER)
+		superspeed_hubs++;
 
 	if (hub_configure(hub, endpoint) >= 0)
 		return 0;
@@ -3230,6 +3235,15 @@ check_highspeed (struct usb_hub *hub, struct usb_device *udev, int port1)
 	kfree(qual);
 }
 
+static void check_superspeed(struct usb_hub *hub, struct usb_device *udev,
+		int port1)
+{
+	if (udev->bos && udev->bos->ss_cap) {
+		dev_info(&udev->dev, "not running at top speed; "
+			"connect to a SuperSpeed port\n");
+	}
+}
+
 static unsigned
 hub_power_remaining (struct usb_hub *hub)
 {
@@ -3449,6 +3463,10 @@ static void hub_port_connect_change(struct usb_hub *hub, int port1,
 				&& udev->speed == USB_SPEED_FULL
 				&& highspeed_hubs != 0)
 			check_highspeed (hub, udev, port1);
+		if (le16_to_cpu(udev->descriptor.bcdUSB) >= 0x0201 &&
+				udev->speed < USB_SPEED_SUPER &&
+				superspeed_hubs != 0)
+			check_superspeed(hub, udev, port1);
 
 		/* Store the parent's children[] pointer.  At this point
 		 * udev becomes globally accessible, although presumably
