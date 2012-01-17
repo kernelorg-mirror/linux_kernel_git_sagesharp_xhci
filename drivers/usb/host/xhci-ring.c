@@ -1080,8 +1080,11 @@ static void handle_set_deq_completion(struct xhci_hcd *xhci,
 				/* We have more usable TRBs */
 				ep_ring->num_trbs_free++;
 				ep_ring->dequeue++;
-				while (last_trb(xhci, ep_ring, ep_ring->deq_seg,
+				if (last_trb(xhci, ep_ring, ep_ring->deq_seg,
 						ep_ring->dequeue)) {
+					if (ep_ring->dequeue ==
+							dev->eps[ep_index].queued_deq_ptr)
+						break;
 					ep_ring->deq_seg =
 						ep_ring->deq_seg->next;
 					ep_ring->dequeue =
