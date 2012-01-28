@@ -1734,7 +1734,7 @@ static int process_ctrl_td(struct xhci_hcd *xhci, struct xhci_td *td,
 
 	switch (trb_comp_code) {
 	case COMP_SUCCESS:
-		if (event_trb == ep_ring->dequeue) {
+		if (event_trb == td->first_trb) {
 			xhci_warn(xhci, "WARN: Success on ctrl setup TRB "
 					"without IOC set??\n");
 			*status = -ESHUTDOWN;
@@ -1765,7 +1765,7 @@ static int process_ctrl_td(struct xhci_hcd *xhci, struct xhci_td *td,
 		/* else fall through */
 	case COMP_STALL:
 		/* Did we transfer part of the data (middle) phase? */
-		if (event_trb != ep_ring->dequeue &&
+		if (event_trb != td->first_trb &&
 				event_trb != td->last_trb)
 			td->urb->actual_length =
 				td->urb->transfer_buffer_length
@@ -1781,7 +1781,7 @@ static int process_ctrl_td(struct xhci_hcd *xhci, struct xhci_td *td,
 	 * Did we transfer any data, despite the errors that might have
 	 * happened?  I.e. did we get past the setup stage?
 	 */
-	if (event_trb != ep_ring->dequeue) {
+	if (event_trb != td->first_trb) {
 		/* The event was for the status stage */
 		if (event_trb == td->last_trb) {
 			if (td->urb->actual_length != 0) {
