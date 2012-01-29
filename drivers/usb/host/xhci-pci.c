@@ -198,6 +198,12 @@ static int xhci_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	struct usb_hcd *hcd;
 
 	driver = (struct hc_driver *)id->driver_data;
+
+	/* stop line IRQ checking in xhci_hcd_pci_probe. */
+	if (dev->vendor == PCI_VENDOR_ID_INTEL &&
+			dev->device == PCI_DEVICE_ID_INTEL_PANTHERPOINT_XHCI)
+		driver->flags |= HCD_MSI_FIRST;
+
 	/* Register the USB 2.0 roothub.
 	 * FIXME: USB core must know to register the USB 2.0 roothub first.
 	 * This is sort of silly, because we could just set the HCD driver flags
