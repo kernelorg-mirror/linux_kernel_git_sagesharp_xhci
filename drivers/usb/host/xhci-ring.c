@@ -272,10 +272,112 @@ static inline int room_on_ring(struct xhci_hcd *xhci, struct xhci_ring *ring,
 /* Ring the host controller doorbell after placing a command on the ring */
 void xhci_ring_cmd_db(struct xhci_hcd *xhci)
 {
+	if (!(xhci->cmd_ring_state & CMD_RING_STATE_RUNNING))
+		return;
+
 	xhci_dbg(xhci, "// Ding dong!\n");
 	xhci_writel(xhci, DB_VALUE_HOST, &xhci->dba->doorbell[0]);
 	/* Flush PCI posted writes */
 	xhci_readl(xhci, &xhci->dba->doorbell[0]);
+}
+
+static int xhci_abort_cmd_ring(struct xhci_hcd *xhci)
+{
+	u64 temp_64;
+	int ret;
+
+	xhci_dbg(xhci, "Abort command ring\n");
+
+	if (!(xhci->cmd_ring_state & CMD_RING_STATE_RUNNING)) {
+		xhci_dbg(xhci, "The command ring isn't running, "
+				"Have the command ring been stopped?");
+		return -EINVAL;
+	}
+
+	temp_64 = xhci_read_64(xhci, &xhci->op_regs->cmd_ring);
+	if (!(temp_64 & CMD_RING_RUNNING)) {
+		xhci_dbg(xhci, "Command ring had been stopped\n");
+		return -EINVAL;
+	}
+	xhci->cmd_ring_state = CMD_RING_STATE_ABORTED;
+	xhci_write_64(xhci, temp_64 | CMD_RING_ABORT,
+			&xhci->op_regs->cmd_ring);
+
+	/* Section 4.6.1.2 of xHCI 1.0 spec says software should
+	 * time the completion od all xHCI commands, including
+	 * the Command Abort operation. If software doesn't see
+	 * CRR negated in a timely manner (e.g. longer than 5
+	 * seconds), then it should assume that the there are
+	 * larger problems with the xHC and assert HCRST.
+	 */
+	ret = handshake(xhci, &xhci->op_regs->cmd_ring,
+			CMD_RING_RUNNING, 0, 5 * 1000 * 1000);
+	if (ret < 0) {
+		xhci_err(xhci, "Stopped the command ring failed, "
+				"maybe the host is dead\n");
+		xhci->xhc_state |= XHCI_STATE_DYING;
+		xhci_quiesce(xhci);
+		xhci_halt(xhci);
+		return -ESHUTDOWN;
+	}
+
+	return 0;
+}
+
+static int queue_cd(struct xhci_hcd *xhci, int slot_id,
+		u32 cmd_type, int ep_index)
+{
+	struct xhci_cd *cd;
+
+	cd = kzalloc(sizeof(struct xhci_cd), GFP_ATOMIC);
+	if (!cd)
+		return -ENOMEM;
+	INIT_LIST_HEAD(&cd->cancel_cmd_list);
+
+	cd->slot_id = slot_id;
+	cd->cmd_type = cmd_type;
+	cd->ep_index = ep_index;
+	list_add_tail(&cd->cancel_cmd_list, &xhci->cancel_cmd_list);
+
+	return 0;
+}
+
+int xhci_cancel_cmd(struct xhci_hcd *xhci, int slot_id,
+		u32 cmd_type, int ep_index)
+{
+	int retval;
+	unsigned long flags;
+
+	spin_lock_irqsave(&xhci->lock, flags);
+
+	if (xhci->xhc_state & XHCI_STATE_DYING) {
+		xhci_warn(xhci, "Abort the command ring,"
+				" but the xHCI is dead.\n");
+		spin_unlock_irqrestore(&xhci->lock, flags);
+		return -ESHUTDOWN;
+	}
+
+	/* queue the cmd desriptor to cancelled_cd_list */
+	retval = queue_cd(xhci, slot_id, cmd_type, ep_index);
+	if (retval) {
+		spin_unlock_irqrestore(&xhci->lock, flags);
+		return retval;
+	}
+
+	/* abort command ring */
+	retval = xhci_abort_cmd_ring(xhci);
+	if (retval) {
+		xhci_err(xhci, "Abort command ring failed\n");
+		spin_unlock_irqrestore(&xhci->lock, flags);
+		if (retval == -ESHUTDOWN) {
+			usb_hc_died(xhci_to_hcd(xhci)->primary_hcd);
+			xhci_dbg(xhci, "xHCI host controller is dead.\n");
+		}
+		return retval;
+	}
+
+	spin_unlock_irqrestore(&xhci->lock, flags);
+	return 0;
 }
 
 void xhci_ring_ep_doorbell(struct xhci_hcd *xhci,
@@ -1067,6 +1169,127 @@ static int handle_cmd_in_cmd_wait_list(struct xhci_hcd *xhci,
 	return 1;
 }
 
+/*
+ * Find the command trb need to be cancelled and modify it to NO OP
+ * command.
+ *
+ * If we can't find the command trb, we think it had already been
+ * executed.
+ */
+static void cd_to_noop(struct xhci_hcd *xhci, struct xhci_cd *cur_cd)
+{
+	struct xhci_segment *cur_seg;
+	union xhci_trb *cmd_trb;
+	int slot_id;
+	u32 cmd_type;
+	u32 cycle_state;
+	int ep_index;
+
+	if (xhci->cmd_ring->dequeue == xhci->cmd_ring->enqueue)
+		return;
+
+	/* find the current segmene of command ring */
+	cur_seg = find_trb_seg(xhci->cmd_ring->first_seg,
+			xhci->cmd_ring->dequeue, &cycle_state);
+
+	/* find the command trb matched by CD from command ring */
+	for (cmd_trb = xhci->cmd_ring->dequeue;
+			cmd_trb != xhci->cmd_ring->enqueue;
+			next_trb(xhci, xhci->cmd_ring, &cur_seg, &cmd_trb)) {
+		if (TRB_TYPE_LINK_LE32(cmd_trb->generic.field[3]))
+			continue;
+
+		slot_id = TRB_TO_SLOT_ID(
+				le32_to_cpu(cmd_trb->generic.field[3]));
+		cmd_type = TRB_FIELD_TO_TYPE(
+				le32_to_cpu(cmd_trb->generic.field[3]));
+		if ((slot_id == cur_cd->slot_id) &&
+				(cmd_type == cur_cd->cmd_type)) {
+
+			/* The ep_index in the command desriptors of Stop
+			 * Endpoint command, Set TR Dequeue Pointer command
+			 * and Reset Endpoint command is vaild. so it should
+			 * be match the ep_index of cd.
+			 */
+			if ((cmd_type == TRB_STOP_RING) ||
+					(cmd_type == TRB_SET_DEQ) ||
+					(cmd_type == TRB_RESET_EP)) {
+				ep_index = TRB_TO_EP_INDEX(le32_to_cpu(
+						cmd_trb->generic.field[3]));
+				if (ep_index != cur_cd->ep_index)
+					continue;
+			}
+
+			/* get cycle state from the origin command trb */
+			cycle_state = le32_to_cpu(cmd_trb->generic.field[3])
+				& TRB_CYCLE;
+
+			/* modify the command trb to NO OP command */
+			cmd_trb->generic.field[0] = 0;
+			cmd_trb->generic.field[1] = 0;
+			cmd_trb->generic.field[2] = 0;
+			cmd_trb->generic.field[3] = cpu_to_le32(
+					TRB_TYPE(TRB_CMD_NOOP) | cycle_state);
+			break;
+		}
+	}
+}
+
+static void cancel_cd(struct xhci_hcd *xhci)
+{
+	struct xhci_cd *cur_cd, *next_cd;
+
+	if (list_empty(&xhci->cancel_cmd_list))
+		return;
+
+	list_for_each_entry_safe(cur_cd, next_cd,
+			&xhci->cancel_cmd_list, cancel_cmd_list) {
+		xhci_dbg(xhci, "Cancel command, slot %d, cmd type %d, "
+				"ep_index = %d\n", cur_cd->slot_id,
+				cur_cd->cmd_type, cur_cd->ep_index);
+		cd_to_noop(xhci, cur_cd);
+
+		/* Whatever we find the matched command trb, we need to
+		 * release the command descriptor.
+		 */
+		list_del(&cur_cd->cancel_cmd_list);
+		kfree(cur_cd);
+	}
+}
+
+static void handle_stopped_cmd_ring(struct xhci_hcd *xhci,
+		struct xhci_event_cmd *event)
+{
+	struct xhci_virt_device *virt_dev;
+	int slot_id = TRB_TO_SLOT_ID(
+			le32_to_cpu(xhci->cmd_ring->dequeue->generic.field[3]));
+	int cmd_trb_comp_code = GET_COMP_CODE(le32_to_cpu(event->status));
+
+	virt_dev = xhci->devs[slot_id];
+	if (virt_dev) {
+		/* if the command is in cmd_list, handle it. */
+		handle_cmd_in_cmd_wait_list(xhci, virt_dev, event);
+	}
+
+	/* advance the dequeue pointer to next cmd trb */
+	inc_deq(xhci, xhci->cmd_ring);
+
+	/* set the cmd ring state */
+	if (cmd_trb_comp_code != COMP_CMD_STOP) {
+		xhci->cmd_ring_state = CMD_RING_STATE_STOPPED;
+	} else {
+		cancel_cd(xhci);
+		xhci->cmd_ring_state = CMD_RING_STATE_RUNNING;
+
+		/*
+		 * ring command ring doorbell again to handle the waiting
+		 * command trbs due to aborting command ring
+		 */
+		if (xhci->cmd_ring->dequeue != xhci->cmd_ring->enqueue)
+			xhci_ring_cmd_db(xhci);
+	}
+}
+
 static void handle_cmd_completion(struct xhci_hcd *xhci,
 		struct xhci_event_cmd *event)
 {
@@ -1092,6 +1315,13 @@ static void handle_cmd_completion(struct xhci_hcd *xhci,
 		xhci->error_bitmask |= 1 << 5;
 		return;
 	}
+
+	if ((GET_COMP_CODE(le32_to_cpu(event->status)) == COMP_CMD_ABORT) ||
+		(GET_COMP_CODE(le32_to_cpu(event->status)) == COMP_CMD_STOP)) {
+		handle_stopped_cmd_ring(xhci, event);
+		return;
+	}
+
 	switch (le32_to_cpu(xhci->cmd_ring->dequeue->generic.field[3])
 		& TRB_TYPE_BITMASK) {
 	case TRB_TYPE(TRB_ENABLE_SLOT):
