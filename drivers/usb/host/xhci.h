@@ -835,6 +835,11 @@ struct xhci_virt_ep {
 #define EP_HAS_STREAMS		(1 << 4)
 /* Transitioning the endpoint to not using streams, don't enqueue URBs */
 #define EP_GETTING_NO_STREAMS	(1 << 5)
+/* Stop endpoint ring temporarily until completion handlers have a chance to
+ * cancel any outstanding URBs.  URB cancellation will set the EP_HALT_PENDING
+ * flag, which will stop the endpoint ring until all cancellations are complete.
+ */
+#define EP_STAY_HALTED		(1 << 6)
 	/* ----  Related to URB cancellation ---- */
 	struct list_head	cancelled_td_list;
 	/* The TRB that was last reported in a stopped endpoint ring */

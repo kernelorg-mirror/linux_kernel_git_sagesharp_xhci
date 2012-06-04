@@ -295,7 +295,7 @@ void xhci_ring_ep_doorbell(struct xhci_hcd *xhci,
 	 * FIXME - check all the stream rings for pending cancellations.
 	 */
 	if ((ep_state & EP_HALT_PENDING) || (ep_state & SET_DEQ_PENDING) ||
-	    (ep_state & EP_HALTED))
+	    (ep_state & EP_HALTED) || (ep_state & EP_STAY_HALTED))
 		return;
 	xhci_writel(xhci, DB_VALUE(ep_index, stream_id), db_addr);
 	/* The CPU has better things to do at this point than wait for a
@@ -1594,12 +1594,20 @@ static int finish_td(struct xhci_hcd *xhci, struct xhci_td *td,
 			 * pointer past the TD.  We can't do that here because
 			 * the halt condition must be cleared first.  Let the
 			 * USB class driver clear the stall later.
+			 *
+			 * The endpoint will remain halted until the stall is
+			 * cleared, so completion handlers will run before the
+			 * ring is restarted.
 			 */
 			ep->stopped_td = td;
 			ep->stopped_trb = event_trb;
 			ep->stopped_stream = ep_ring->stream_id;
 		} else if (xhci_requires_manual_halt_cleanup(xhci,
 					ep_ctx, trb_comp_code)) {
+			/* Let the URB completion handlers run before restarting
+			 * the endpoint ring.
+			 */
+			ep->ep_state |= EP_STAY_HALTED;
 			/* Other types of errors halt the endpoint, but the
 			 * class driver doesn't call usb_reset_endpoint() unless
 			 * the error is -EPIPE.  Clear the halted status in the
@@ -1658,6 +1666,14 @@ td_cleanup:
 		}
 	}
 
+	/* If we've only kept the ring halted in order for the completion
+	 * handlers to run (and not because the ring is halted by a STALL), then
+	 * restart the ring.
+	 */
+	if (ep->ep_state & EP_STAY_HALTED) {
+		ep->ep_state &= ~EP_STAY_HALTED;
+		xhci_ring_ep_doorbell(xhci, slot_id, ep_index, 0);
+	}
 	return ret;
 }
 
@@ -1674,6 +1690,7 @@ static int process_ctrl_td(struct xhci_hcd *xhci, struct xhci_td *td,
 	int ep_index;
 	struct xhci_ep_ctx *ep_ctx;
 	u32 trb_comp_code;
+	int ret;
 
 	slot_id = TRB_TO_SLOT_ID(le32_to_cpu(event->flags));
 	xdev = xhci->devs[slot_id];
@@ -1723,9 +1740,19 @@ static int process_ctrl_td(struct xhci_hcd *xhci, struct xhci_td *td,
 		else
 			td->urb->actual_length = 0;
 
+		/* Let the URB completion handlers run before restarting the
+		 * endpoint ring.  finish_td() won't set the EP_STAY_HALTED flag
+		 * for COMP_STALL.  We have to set it ourselves before we call
+		 * xhci_cleanup_halted_endpoint(), since that will queue a Set
+		 * TR Dequeue command, which may restart the ring on completion.
+		 */
+		ep->ep_state |= EP_STAY_HALTED;
 		xhci_cleanup_halted_endpoint(xhci,
 			slot_id, ep_index, 0, td, event_trb);
-		return finish_td(xhci, td, event_trb, event, ep, status, true);
+		ret = finish_td(xhci, td, event_trb, event, ep, status, true);
+		ep->ep_state &= ~EP_STAY_HALTED;
+		xhci_ring_ep_doorbell(xhci, slot_id, ep_index, 0);
+		return ret;
 	}
 	/*
 	 * Did we transfer any data, despite the errors that might have
