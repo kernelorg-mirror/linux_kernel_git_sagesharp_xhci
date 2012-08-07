@@ -1693,6 +1693,62 @@ rescan:
 	}
 }
 
+static int usb_hcd_drop_or_add_alt0(struct usb_device *udev,
+		struct usb_host_config *config,
+		bool drop)
+{
+	int num_intfs, i, ret;
+	struct usb_hcd *hcd;
+
+	hcd = bus_to_hcd(udev->bus);
+	num_intfs = config->desc.bNumInterfaces;
+	for (i = 0; i < num_intfs; ++i) {
+		struct usb_host_interface *first_alt, *alt;
+		int iface_num, j;
+
+		first_alt = &config->intf_cache[i]->altsetting[0];
+		iface_num = first_alt->desc.bInterfaceNumber;
+		/* Set up endpoints for alternate interface setting 0 */
+		alt = usb_find_alt_setting(config, iface_num, 0);
+		if (!alt)
+			/* No alt setting 0? Pick the first setting. */
+			alt = first_alt;
+
+		for (j = 0; j < alt->desc.bNumEndpoints; j++) {
+			if (drop)
+				ret = hcd->driver->drop_endpoint(hcd, udev,
+						&alt->endpoint[j]);
+			else
+				ret = hcd->driver->add_endpoint(hcd, udev,
+						&alt->endpoint[j]);
+			if (ret < 0)
+				return ret;
+		}
+	}
+	return 0;
+}
+
+/**
+ * usb_hcd_revert_bandwidth - revert a configuration that failed to be installed.
+ */
+int usb_hcd_revert_bandwidth(struct usb_device *udev,
+		struct usb_host_config *failed_config)
+{
+	int ret;
+	struct usb_hcd *hcd;
+
+	hcd = bus_to_hcd(udev->bus);
+	if (!hcd->driver->check_bandwidth)
+		return 0;
+
+	ret = usb_hcd_drop_or_add_alt0(udev, failed_config, true);
+	if (!ret)
+		ret = hcd->driver->check_bandwidth(hcd, udev);
+	if (ret < 0)
+		hcd->driver->reset_bandwidth(hcd, udev);
+	return ret;
+}
+
 /**
  * usb_hcd_alloc_bandwidth - check whether a new bandwidth setting exceeds
  *				the bus bandwidth
@@ -1719,8 +1775,7 @@ int usb_hcd_alloc_bandwidth(struct usb_device *udev,
 		struct usb_host_interface *cur_alt,
 		struct usb_host_interface *new_alt)
 {
-	int num_intfs, i, j;
-	struct usb_host_interface *alt = NULL;
+	int num_intfs, i;
 	int ret = 0;
 	struct usb_hcd *hcd;
 	struct usb_host_endpoint *ep;
@@ -1766,24 +1821,9 @@ int usb_hcd_alloc_bandwidth(struct usb_device *udev,
 					goto reset;
 			}
 		}
-		for (i = 0; i < num_intfs; ++i) {
-			struct usb_host_interface *first_alt;
-			int iface_num;
-
-			first_alt = &new_config->intf_cache[i]->altsetting[0];
-			iface_num = first_alt->desc.bInterfaceNumber;
-			/* Set up endpoints for alternate interface setting 0 */
-			alt = usb_find_alt_setting(new_config, iface_num, 0);
-			if (!alt)
-				/* No alt setting 0? Pick the first setting. */
-				alt = first_alt;
-
-			for (j = 0; j < alt->desc.bNumEndpoints; j++) {
-				ret = hcd->driver->add_endpoint(hcd, udev, &alt->endpoint[j]);
-				if (ret < 0)
-					goto reset;
-			}
-		}
+		ret = usb_hcd_drop_or_add_alt0(udev, new_config, false);
+		if (ret < 0)
+			goto reset;
 	}
 	if (cur_alt && new_alt) {
 		struct usb_interface *iface = usb_ifnum_to_if(udev,

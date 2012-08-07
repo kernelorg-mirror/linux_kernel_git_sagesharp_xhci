@@ -1812,7 +1812,10 @@ free_interfaces:
 	if (ret < 0) {
 		/* All the old state is gone, so what else can we do?
 		 * The device is probably useless now anyway.
+		 * We need to deallocate the bandwidth from the failed
+		 * configuration, so we don't leak host resources.
 		 */
+		usb_hcd_revert_bandwidth(dev, cp);
 		cp = NULL;
 	}
 
