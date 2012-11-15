@@ -2495,6 +2495,11 @@ static int hub_port_wait_reset(struct usb_hub *hub, int port1,
 		if (ret < 0)
 			return ret;
 
+		/* Ignore USB 3.0 CCS and link state until the reset finishes */
+		if (hub_is_superspeed(hub->hdev) &&
+				(portstatus & USB_PORT_STAT_RESET))
+			goto delay;
+
 		/*
 		 * Some buggy devices require a warm reset to be issued even
 		 * when the port appears not to be connected.
@@ -2562,6 +2567,7 @@ static int hub_port_wait_reset(struct usb_hub *hub, int port1,
 				return 0;
 		}
 
+delay:
 		/* switch to the long delay after two short delay failures */
 		if (delay_time >= 2 * HUB_SHORT_RESET_TIME)
 			delay = HUB_LONG_RESET_TIME;
