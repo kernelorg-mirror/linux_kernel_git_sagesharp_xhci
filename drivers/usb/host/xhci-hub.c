@@ -340,6 +340,10 @@ static void xhci_disable_port(struct usb_hcd *hcd, struct xhci_hcd *xhci,
 		return;
 	}
 
+	/* Clear all change bits, so that we get a device connect event. */
+	port_status |= PORT_CSC | PORT_PEC | PORT_WRC |
+		PORT_OCC | PORT_RC | PORT_PLC |
+		PORT_CEC;
 	/* Write 1 to disable the port */
 	xhci_writel(xhci, port_status | PORT_PE, addr);
 	port_status = xhci_readl(xhci, addr);
