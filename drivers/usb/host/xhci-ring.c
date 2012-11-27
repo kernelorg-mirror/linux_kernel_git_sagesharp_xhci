@@ -1725,6 +1725,13 @@ cleanup:
 	if (bogus_port_status)
 		return;
 
+	/*
+	 * xHCI portsc bits are level-triggered. An event is sent on the first
+	 * change bit, but won't be sent if another change bit is still set.
+	 * Poll to avoid losing change bits.
+	 */
+	xhci_dbg(xhci, "%s: starting port polling.\n", __func__);
+	set_bit(HCD_FLAG_POLL_RH, &hcd->flags);
 	spin_unlock(&xhci->lock);
 	/* Pass this up to the core */
 	usb_hcd_poll_rh_status(hcd);
