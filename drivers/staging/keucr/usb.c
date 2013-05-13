@@ -597,7 +597,7 @@ static int eucr_probe(struct usb_interface *intf,
 	wake_up_process(th);
 
 	/* probe card type */
-	result = ENE_Read_BYTE(us, REG_CARD_STATUS, &MiscReg03);
+	result = ene_read_byte(us, REG_CARD_STATUS, &MiscReg03);
 	if (result != USB_STOR_XFER_GOOD) {
 		result = USB_STOR_TRANSPORT_ERROR;
 		quiesce_and_remove_host(us);
