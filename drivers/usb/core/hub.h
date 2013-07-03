@@ -110,6 +110,8 @@ extern int hub_port_debounce(struct usb_hub *hub, int port1,
 		bool must_be_connected);
 extern int usb_clear_port_feature(struct usb_device *hdev,
 		int port1, int feature);
+extern int hub_port_reset(struct usb_hub *hub, int port1,
+		struct usb_device *udev, unsigned int delay, bool warm);
 
 static inline int hub_port_debounce_be_connected(struct usb_hub *hub,
 		int port1)
@@ -123,3 +125,7 @@ static inline int hub_port_debounce_be_stable(struct usb_hub *hub,
 	return hub_port_debounce(hub, port1, false);
 }
 
+static inline int hub_is_superspeed(struct usb_device *hdev)
+{
+	return (hdev->descriptor.bDeviceProtocol == USB_HUB_PR_SS);
+}

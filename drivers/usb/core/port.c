@@ -86,6 +86,18 @@ static int usb_port_runtime_resume(struct device *dev)
 	set_bit(port1, hub->busy_bits);
 
 	retval = usb_hub_set_port_power(hdev, hub, port1, true);
+
+	/*
+	 * port_dev->child maybe NULL for port without device
+	 * and hub_port_reset will check it. Pass 0 delay to
+	 * hub_port_reset() since hub_port_debounce_be_connected()
+	 * will wait until port status becomes CONNECTION if port has
+	 * device attached.
+	 */
+	if (!retval && hub_is_superspeed(hdev))
+		hub_port_reset(hub, port1, port_dev->child,
+			       0, true);
+
 	if (port_dev->child && !retval) {
 		/*
 		 * Attempt to wait for usb hub port to be reconnected in order

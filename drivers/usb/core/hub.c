@@ -43,11 +43,6 @@
 #define USB_VENDOR_GENESYS_LOGIC		0x05e3
 #define HUB_QUIRK_CHECK_PORT_AUTOSUSPEND	0x01
 
-static inline int hub_is_superspeed(struct usb_device *hdev)
-{
-	return (hdev->descriptor.bDeviceProtocol == USB_HUB_PR_SS);
-}
-
 /* Protect struct usb_device->state and ->children members
  * Note: Both are also protected by ->dev.sem, except that ->state can
  * change to USB_STATE_NOTATTACHED even when the semaphore isn't held. */
@@ -2522,9 +2517,6 @@ static unsigned hub_is_wusb(struct usb_hub *hub)
 #define HUB_LONG_RESET_TIME	200
 #define HUB_RESET_TIMEOUT	800
 
-static int hub_port_reset(struct usb_hub *hub, int port1,
-			struct usb_device *udev, unsigned int delay, bool warm);
-
 /* Is a USB 3.0 port in the Inactive or Complinance Mode state?
  * Port worm reset is required to recover
  */
@@ -2644,7 +2636,7 @@ static void hub_port_finish_reset(struct usb_hub *hub, int port1,
 }
 
 /* Handle port reset and port warm(BH) reset (for USB3 protocol ports) */
-static int hub_port_reset(struct usb_hub *hub, int port1,
+int hub_port_reset(struct usb_hub *hub, int port1,
 			struct usb_device *udev, unsigned int delay, bool warm)
 {
 	int i, status;
@@ -2686,8 +2678,18 @@ static int hub_port_reset(struct usb_hub *hub, int port1,
 					"cannot %sreset port %d (err = %d)\n",
 					warm ? "warm " : "", port1, status);
 		} else {
-			status = hub_port_wait_reset(hub, port1, udev, delay,
-								warm);
+
+			/*
+			 * If delay is 0, don't wait for reset being completed.
+			 * This will be used in some cases that do wait after
+			 * hub_port_reset(). (e.g. usb_port_runtime_resume())
+			 */
+			if (delay)
+				status = hub_port_wait_reset(hub, port1, udev,
+						delay, warm);
+			else
+				status = 0;
+
 			if (status && status != -ENOTCONN && status != -ENODEV)
 				dev_dbg(hub->intfdev,
 						"port_wait_reset: err = %d\n",
