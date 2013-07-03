@@ -70,6 +70,20 @@ static void usb_port_device_release(struct device *dev)
 }
 
 #ifdef CONFIG_PM_RUNTIME
+
+static void usb_set_pair_port_power(struct usb_port *port_dev, bool set)
+{
+	struct usb_port *pair_port = port_dev->pair_pdev;
+	struct usb_interface *pair_intf =
+			to_usb_interface(pair_port->dev.parent);
+	struct usb_device *pair_hdev =	to_usb_device(pair_intf->dev.parent);
+	struct usb_hub *pair_hub = usb_hub_to_struct_hub(pair_hdev);
+
+	usb_autopm_get_interface(pair_intf);
+	usb_hub_set_port_power(pair_hdev, pair_hub, pair_port->portnum, set);
+	usb_autopm_put_interface(pair_intf);
+}
+
 static int usb_port_runtime_resume(struct device *dev)
 {
 	struct usb_port *port_dev = to_usb_port(dev);
@@ -115,6 +129,10 @@ static int usb_port_runtime_resume(struct device *dev)
 
 	clear_bit(port1, hub->busy_bits);
 	usb_autopm_put_interface(intf);
+
+	if (port_dev->pair_pdev)
+		usb_set_pair_port_power(port_dev, true);
+
 	return retval;
 }
 
@@ -133,6 +151,9 @@ static int usb_port_runtime_suspend(struct device *dev)
 	if (dev_pm_qos_flags(&port_dev->dev, PM_QOS_FLAG_NO_POWER_OFF)
 			== PM_QOS_FLAGS_ALL)
 		return -EAGAIN;
+
+	if (port_dev->pair_pdev)
+		usb_set_pair_port_power(port_dev, false);
 
 	usb_autopm_get_interface(intf);
 	set_bit(port1, hub->busy_bits);
