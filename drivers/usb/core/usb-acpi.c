@@ -18,7 +18,7 @@
 #include <linux/usb/hcd.h>
 #include <acpi/acpi_bus.h>
 
-#include "usb.h"
+#include "hub.h"
 
 /**
  * usb_acpi_power_manageable - check whether usb port has
@@ -82,10 +82,51 @@ int usb_acpi_set_power_state(struct usb_device *hdev, int index, bool enable)
 }
 EXPORT_SYMBOL_GPL(usb_acpi_set_power_state);
 
+static bool usb_port_check_pair(struct usb_port *pdev,
+		struct usb_port *pair_pdev)
+{
+	if (pdev->panel == pair_pdev->panel &&
+			pdev->shape == pair_pdev->shape &&
+			pdev->group_token == pair_pdev->group_token &&
+			pdev->group_orientation == pair_pdev->group_orientation &&
+			pdev->vertical_position == pair_pdev->vertical_position &&
+			pdev->horizontal_position == pair_pdev->horizontal_position)
+		return true;
+	return false;
+}
+
+static void usb3_port_find_pair_port(struct usb_device *hdev, int port1)
+{
+	struct usb_hcd *hcd = bus_to_hcd(hdev->bus);
+	struct usb_hcd *share_hcd = hcd->shared_hcd;
+	struct usb_device *pair_hdev = share_hcd->self.root_hub;
+	struct usb_hub *hub = usb_hub_to_struct_hub(hdev);
+	struct usb_hub *pair_hub = usb_hub_to_struct_hub(pair_hdev);
+	struct usb_port *port_dev = hub->ports[port1 - 1];
+	struct usb_port *pair_pdev = NULL;
+	int i;
+
+	for (i = 0; i < pair_hdev->maxchild; i++) {
+		pair_pdev = pair_hub->ports[i];
+
+		if (!port_dev->pair_pdev &&
+				!pair_pdev->pair_pdev &&
+				usb_port_check_pair(port_dev, pair_pdev)) {
+			port_dev->pair_pdev = pair_pdev;
+			pair_pdev->pair_pdev = port_dev;
+			dev_dbg(&hdev->dev, "port%d pair hub %s portnum %d\n",
+				port1, dev_name(&pair_hdev->dev),
+				pair_pdev->portnum);
+		}
+	}
+}
+
 static int usb_acpi_check_port_connect_type(struct usb_device *hdev,
 	acpi_handle handle, int port1)
 {
 	acpi_status status;
+	struct usb_hub *hub = usb_hub_to_struct_hub(hdev);
+	struct usb_port *port_dev = hub->ports[port1 - 1];
 	struct acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL };
 	union acpi_object *upc;
 	struct acpi_pld_info *pld;
@@ -120,6 +161,16 @@ static int usb_acpi_check_port_connect_type(struct usb_device *hdev,
 				USB_PORT_CONNECT_TYPE_HARD_WIRED);
 	else if (!pld->user_visible)
 		usb_set_hub_port_connect_type(hdev, port1, USB_PORT_NOT_USED);
+
+	port_dev->panel = pld->panel;
+	port_dev->vertical_position = pld->vertical_position;
+	port_dev->horizontal_position = pld->horizontal_position;
+	port_dev->shape = pld->shape;
+	port_dev->group_orientation = pld->group_orientation;
+	port_dev->group_token = pld->group_token;
+
+	if (!hdev->parent && hub_is_superspeed(hdev))
+		usb3_port_find_pair_port(hdev, port1);
 
 out:
 	ACPI_FREE(pld);

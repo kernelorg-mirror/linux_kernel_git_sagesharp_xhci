@@ -90,8 +90,15 @@ struct usb_port {
 	struct usb_device *child;
 	struct device dev;
 	struct dev_state *port_owner;
+	struct usb_port *pair_pdev;
 	enum usb_port_connect_type connect_type;
 	u8 portnum;
+	u8 panel;
+	u8 vertical_position;
+	u8 horizontal_position;
+	u8 shape;
+	u8 group_orientation;
+	u8 group_token;
 	unsigned power_is_on:1;
 	unsigned did_runtime_put:1;
 };
