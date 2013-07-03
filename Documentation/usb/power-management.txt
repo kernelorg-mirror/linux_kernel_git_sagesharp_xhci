@@ -1,3 +1,4 @@
+
 			Power Management for USB
 
 		 Alan Stern <stern@rowland.harvard.edu>
@@ -516,3 +517,143 @@ relevant attribute files is usb2_hardware_lpm.
 		driver will enable hardware LPM	for the device. You
 		can write y/Y/1 or n/N/0 to the file to	enable/disable
 		USB2 hardware LPM manually. This is for	test purpose mainly.
+
+
+	USB port power off mechanism
+	---------------------
+
+Some platforms can provide interfaces to power off usb port completely.
+This can be found on systems like the Intel Haswell-ULT platform.  The power
+resources can be turned on/off dynamically, via ACPI. The USB ports will be
+automatically powered off under specific conditions, which are listed in the
+"Kernel port power off policy" section.
+
+For more details, see the Linux Plumbers Conference 2012 slides and video:
+
+http://dl.dropbox.com/u/96820575/sarah-sharp-lpt-port-power-off2-mini.pdf
+http://linuxplumbers.ubicast.tv/videos/usb-port-power-off-kerneluserspace-api/
+
+
+BIG GIANT WARNING!!!
+====================
+
+The USB port power off mechanism on the Haswell-ULT platform completely cuts
+the power lines to the USB port, and powers off the USB PHY.  That means any
+attached USB device will see a physical disconnect, and lose power.  This
+may cause firmware to be wiped, which may cause issues with devices that
+have the AVOID_RESET_QUIRK set.
+
+After being powered off, the USB port will not generate any hotplug,
+remote wakeup, or over-current events.  If you power off a USB port that the
+user can interact with, it means the port will seem "dead" when a user plugs
+in a USB device.  Worse, the hardware may gang power rails for a set of
+ports, which means the "dead" ports may not be triggered until a specific
+set of USB ports have been powered off.
+
+Avoid "dead" USB ports.  Read this whole section carefully, especially the
+"Suggested Userspace Policy" section.
+
+
+Port power off mechanisms
+=========================
+
+The user interfaces for controlling the USB port power off mechanism are
+located in the power/ subdirectory of each USB port's sysfs directory:
+
+	/sys/bus/usb/devices/[usb device]/[usb hub interface]/portX/power
+
+For example, the roothub port power files are under:
+
+	/sys/bus/usb/devices/usb3/3-0:1.0/port1/power
+
+The relevant attribute files are pm_qos_no_power_off and control.  The
+control file sets the kernel policy for the port, i.e. whether the port is
+automatically powered off when kernel policy requirements are met.  The
+pm_qos_no_power_off files allow kernel and userspace programs to register
+a PM QOS request to keep the port powered on.
+
+If the control file is set to 'auto', the kernel will automatically power
+down the port when specific requirements are met. If the control file is
+set to 'on' the port will remain powered on.
+
+The power/pm_qos_no_power_off allows userspace to disable the USB power off
+mechanism. If it's set to '1', the port must not be powered off. If it's
+cleared to '0', the port may be powered off when specific requirements are
+met.
+
+The default policy for all ports is to always remain powered on, until
+userspace indicates which ports are safe to power off.  By default,
+power/control is set to 'auto', and power/pm_qos_no_power_off is set to '1'
+
+To enable automatic USB port power off while the system is active, it's
+necessary to enable Runtime PM by running:
+
+	echo 0 > power/pm_qos_no_power_off
+
+
+Where is my USB ports?
+======================
+
+ACPI provides a mechanism to describe whether a port is "user-visible" and
+"connectible".  "User-visible" means users can physically interact with the
+port.  "Connectible" means users can connect and disconnect devices, either
+by physically pulling out the device, or via a hardware switch, like those
+used to disconnect internal USB bluetooth and wifi devices.
+
+For simplicity, the kernel exposes this information via one sysfs file, in
+portX/power/connect_type.  For example, the connection type for roothub
+port 1 is in:
+
+	/sys/bus/usb/devices/usb3/3-0:1.0/port1/connect_type
+
+The four connection types are  "hotplug", "hardwired", "not used" and
+"unknown".
+
+"hotplug" refers to a port on the outside of a laptop which is visible and
+connectible.
+
+"hardwired" refers to a port that is not visible but connectible. Examples
+internal port for USB bluetooth that can be disconnected via an external
+switch and port with a hardwired USB camera.
+
+"not used" refers to internal port that will never have a device connected
+to it.  These may be empty internal ports, or ports that are not physically
+exposed on this chipset skew.
+
+"unknown" means platform doesn't provide valid port's information for this port.
+
+Note that since we are relying on BIOS writers to get this ACPI information
+correct, the USB port descriptions may be missing or wrong.  TODO: If a USB
+port is marked as "not used" (meaning "not visible" and "not connectible"),
+and the USB core detects a hotplug event on the port, change the port
+connection type to be "hard-wired".
+
+
+Kernel port power off policy
+============================
+
+Empty USB ports will be powered off immediately when the pm_qos_no_power_off
+flag is cleared.
+
+Ports with devices connected will be powered off when device is suspended,
+the port's pm_qos_no_power_off flag is cleared, the device is marked as
+persistent, and remote wakeup is disabled.
+
+
+Suggested userspace policy
+==========================
+
+Userspace needs to be VERY CAREFUL about which USB ports it enables for
+port power off (by echoing '0' to power/pm_qos_no_power_off).
+
+A "safe" userspace policy would be to enable USB port power off for ports
+that have the port/connect_type set to "hardwired" or "not used".  That way,
+external ports will always remain powered on, and users will never notice
+"dead" USB ports.
+
+A more aggressive userspace policy would be to enable USB port power off for
+all ports when some external factor indicates the user has stopped
+interacting with the system.  For example, a distro may want to enable power
+off all USB ports when the screen blanks, and re-power them when the screen
+becomes active.  Smart phones and tablets may want to power off USB ports
+when the user pushes the power button.
