@@ -2918,7 +2918,6 @@ int usb_port_suspend(struct usb_device *udev, pm_message_t msg)
 {
 	struct usb_hub	*hub = usb_hub_to_struct_hub(udev->parent);
 	struct usb_port *port_dev = hub->ports[udev->portnum - 1];
-	enum pm_qos_flags_status pm_qos_stat;
 	int		port1 = udev->portnum;
 	int		status;
 	bool		really_suspend = true;
@@ -3043,10 +3042,7 @@ int usb_port_suspend(struct usb_device *udev, pm_message_t msg)
 	 * Check whether current status meets the requirement of
 	 * usb port power off mechanism
 	 */
-	pm_qos_stat = dev_pm_qos_flags(&port_dev->dev,
-			PM_QOS_FLAG_NO_POWER_OFF);
 	if (!udev->do_remote_wakeup
-			&& pm_qos_stat != PM_QOS_FLAGS_ALL
 			&& udev->persist_enabled
 			&& !status) {
 		pm_runtime_put_sync(&port_dev->dev);
