@@ -3705,12 +3705,13 @@ disable_slot:
 }
 
 /*
- * Issue an Address Device command (which will issue a SetAddress request to
- * the device).
+ * Issue an Address Device command and optionally send a corresponding
+ * SetAddress request to the device.
  * We should be protected by the usb_address0_mutex in khubd's hub_port_init, so
  * we should only issue and wait on one address command at the same time.
  */
-int xhci_address_device(struct usb_hcd *hcd, struct usb_device *udev)
+static int __xhci_address_device(struct usb_hcd *hcd, struct usb_device *udev,
+				 int trb_bsr)
 {
 	unsigned long flags;
 	int timeleft;
@@ -3769,7 +3770,7 @@ int xhci_address_device(struct usb_hcd *hcd, struct usb_device *udev)
 	spin_lock_irqsave(&xhci->lock, flags);
 	cmd_trb = xhci_find_next_enqueue(xhci->cmd_ring);
 	ret = xhci_queue_address_device(xhci, virt_dev->in_ctx->dma,
-					udev->slot_id);
+					udev->slot_id, trb_bsr);
 	if (ret) {
 		spin_unlock_irqrestore(&xhci->lock, flags);
 		xhci_dbg_trace(xhci, trace_xhci_dbg_address,
@@ -3858,6 +3859,18 @@ int xhci_address_device(struct usb_hcd *hcd, struct usb_device *udev)
 	ctrl_ctx->drop_flags = 0;
 
 	return 0;
+}
+
+/* AddressDevice + SetAddress */
+int xhci_address_device(struct usb_hcd *hcd, struct usb_device *udev)
+{
+	return __xhci_address_device(hcd, udev, 0);
+}
+
+/* AddressDevice */
+int xhci_enable_device(struct usb_hcd *hcd, struct usb_device *udev)
+{
+	return __xhci_address_device(hcd, udev, TRB_BSR);
 }
 
 /*

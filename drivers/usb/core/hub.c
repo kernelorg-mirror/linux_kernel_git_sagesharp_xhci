@@ -3951,6 +3951,22 @@ static int hub_set_address(struct usb_device *udev, int devnum)
 	return retval;
 }
 
+static int hub_enable_device(struct usb_device *udev)
+{
+	int retval;
+	struct usb_hcd *hcd = bus_to_hcd(udev->bus);
+
+	if (!hcd->driver->enable_device)
+		return 0;
+	if (udev->state == USB_STATE_ADDRESS)
+		return 0;
+	if (udev->state != USB_STATE_DEFAULT)
+		return -EINVAL;
+
+	retval = hcd->driver->enable_device(hcd, udev);
+	return retval;
+}
+
 /* Reset device, (re)assign address, get device descriptor.
  * Device connection must be stable, no more debouncing needed.
  * Returns device in USB_STATE_ADDRESS, except on error.
@@ -4071,7 +4087,7 @@ hub_port_init (struct usb_hub *hub, struct usb_device *udev, int port1,
 	 * value.
 	 */
 	for (i = 0; i < GET_DESCRIPTOR_TRIES; (++i, msleep(100))) {
-		if (USE_NEW_SCHEME(retry_counter) && !(hcd->driver->flags & HCD_USB3)) {
+		if (USE_NEW_SCHEME(retry_counter)) {
 			struct usb_device_descriptor *buf;
 			int r = 0;
 
@@ -4081,6 +4097,10 @@ hub_port_init (struct usb_hub *hub, struct usb_device *udev, int port1,
 				retval = -ENOMEM;
 				continue;
 			}
+
+			retval = hub_enable_device(udev);
+			if (retval < 0)
+				goto fail;
 
 			/* Retry on all errors; some devices are flakey.
 			 * 255 is for WUSB devices, we actually need to use
@@ -4163,7 +4183,7 @@ hub_port_init (struct usb_hub *hub, struct usb_device *udev, int port1,
 			 *  - read ep0 maxpacket even for high and low speed,
 			 */
 			msleep(10);
-			if (USE_NEW_SCHEME(retry_counter) && !(hcd->driver->flags & HCD_USB3))
+			if (USE_NEW_SCHEME(retry_counter))
 				break;
   		}
 
