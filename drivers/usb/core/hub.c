@@ -4730,6 +4730,8 @@ static void hub_events(void)
 
 		/* deal with port status changes */
 		for (i = 1; i <= hdev->maxchild; i++) {
+			struct usb_device *udev = hub->ports[i - 1]->child;
+
 			if (test_bit(i, hub->busy_bits))
 				continue;
 			connect_change = test_bit(i, hub->change_bits);
@@ -4828,8 +4830,6 @@ static void hub_events(void)
 			 */
 			if (hub_port_warm_reset_required(hub, portstatus)) {
 				int status;
-				struct usb_device *udev =
-					hub->ports[i - 1]->child;
 
 				dev_dbg(hub_dev, "warm reset port %d\n", i);
 				if (!udev || !(portstatus &
@@ -4845,6 +4845,24 @@ static void hub_events(void)
 					usb_unlock_device(udev);
 					connect_change = 0;
 				}
+			/*
+			 * On disconnect USB3 protocol ports transit from U0 to
+			 * SS.Inactive to Rx.Detect. If this happens a warm-
+			 * reset is not needed, but a (re)connect may happen
+			 * before khubd runs and sees the disconnect, and the
+			 * device may be an unknown state.
+			 *
+			 * If the port went through SS.Inactive without khubd
+			 * seeing it the C_LINK_STATE change flag will be set,
+			 * and we reset the dev to put it in a known state.
+			 */
+			} else if (udev && hub_is_superspeed(hub->hdev) &&
+				   (portchange & USB_PORT_STAT_C_LINK_STATE) &&
+				   (portstatus & USB_PORT_STAT_CONNECTION)) {
+				usb_lock_device(udev);
+				usb_reset_device(udev);
+				usb_unlock_device(udev);
+				connect_change = 0;
 			}
 
 			if (connect_change)
@@ -5102,7 +5120,7 @@ static int usb_reset_and_verify_device(struct usb_device *udev)
 	struct usb_hcd			*hcd = bus_to_hcd(udev->bus);
 	struct usb_device_descriptor	descriptor = udev->descriptor;
 	struct usb_host_bos		*bos;
-	int 				i, ret = 0;
+	int				i, j, ret = 0;
 	int				port1 = udev->portnum;
 
 	if (udev->state == USB_STATE_NOTATTACHED ||
@@ -5228,6 +5246,9 @@ static int usb_reset_and_verify_device(struct usb_device *udev)
 				ret);
 			goto re_enumerate;
 		}
+		/* Resetting also frees any allocated streams */
+		for (j = 0; j < intf->cur_altsetting->desc.bNumEndpoints; j++)
+			intf->cur_altsetting->endpoint[j].streams = 0;
 	}
 
 done:

@@ -551,9 +551,9 @@ void xhci_find_new_dequeue_state(struct xhci_hcd *xhci,
 		struct xhci_dequeue_state *state)
 {
 	struct xhci_virt_device *dev = xhci->devs[slot_id];
+	struct xhci_virt_ep *ep = &dev->eps[ep_index];
 	struct xhci_ring *ep_ring;
 	struct xhci_generic_trb *trb;
-	struct xhci_ep_ctx *ep_ctx;
 	dma_addr_t addr;
 
 	ep_ring = xhci_triad_to_transfer_ring(xhci, slot_id,
@@ -578,8 +578,16 @@ void xhci_find_new_dequeue_state(struct xhci_hcd *xhci,
 	/* Dig out the cycle state saved by the xHC during the stop ep cmd */
 	xhci_dbg_trace(xhci, trace_xhci_dbg_cancel_urb,
 			"Finding endpoint context");
-	ep_ctx = xhci_get_ep_ctx(xhci, dev->out_ctx, ep_index);
-	state->new_cycle_state = 0x1 & le64_to_cpu(ep_ctx->deq);
+	/* 4.6.9 the css flag is written to the stream context for streams */
+	if (ep->ep_state & EP_HAS_STREAMS) {
+		struct xhci_stream_ctx *ctx =
+			&ep->stream_info->stream_ctx_array[stream_id];
+		state->new_cycle_state = 0x1 & le64_to_cpu(ctx->stream_ring);
+	} else {
+		struct xhci_ep_ctx *ep_ctx
+			= xhci_get_ep_ctx(xhci, dev->out_ctx, ep_index);
+		state->new_cycle_state = 0x1 & le64_to_cpu(ep_ctx->deq);
+	}
 
 	state->new_deq_ptr = cur_td->last_trb;
 	xhci_dbg_trace(xhci, trace_xhci_dbg_cancel_urb,
@@ -1078,12 +1086,14 @@ static void xhci_handle_cmd_set_deq(struct xhci_hcd *xhci, int slot_id,
 	unsigned int stream_id;
 	struct xhci_ring *ep_ring;
 	struct xhci_virt_device *dev;
+	struct xhci_virt_ep *ep;
 	struct xhci_ep_ctx *ep_ctx;
 	struct xhci_slot_ctx *slot_ctx;
 
 	ep_index = TRB_TO_EP_INDEX(le32_to_cpu(trb->generic.field[3]));
 	stream_id = TRB_TO_STREAM_ID(le32_to_cpu(trb->generic.field[2]));
 	dev = xhci->devs[slot_id];
+	ep = &dev->eps[ep_index];
 
 	ep_ring = xhci_stream_id_to_ring(dev, ep_index, stream_id);
 	if (!ep_ring) {
@@ -1135,12 +1145,19 @@ static void xhci_handle_cmd_set_deq(struct xhci_hcd *xhci, int slot_id,
 		 * cancelling URBs, which might not be an error...
 		 */
 	} else {
+		u64 deq;
+		/* 4.6.10 deq ptr is written to the stream ctx for streams */
+		if (ep->ep_state & EP_HAS_STREAMS) {
+			struct xhci_stream_ctx *ctx =
+				&ep->stream_info->stream_ctx_array[stream_id];
+			deq = le64_to_cpu(ctx->stream_ring) & SCTX_DEQ_MASK;
+		} else {
+			deq = le64_to_cpu(ep_ctx->deq) & ~EP_CTX_CYCLE_MASK;
+		}
 		xhci_dbg_trace(xhci, trace_xhci_dbg_cancel_urb,
-			"Successful Set TR Deq Ptr cmd, deq = @%08llx",
-			 le64_to_cpu(ep_ctx->deq));
-		if (xhci_trb_virt_to_dma(dev->eps[ep_index].queued_deq_seg,
-					 dev->eps[ep_index].queued_deq_ptr) ==
-		    (le64_to_cpu(ep_ctx->deq) & ~(EP_CTX_CYCLE_MASK))) {
+			"Successful Set TR Deq Ptr cmd, deq = @%08llx", deq);
+		if (xhci_trb_virt_to_dma(ep->queued_deq_seg,
+					 ep->queued_deq_ptr) == deq) {
 			/* Update the ring's dequeue segment and dequeue pointer
 			 * to reflect the new position.
 			 */
@@ -1150,8 +1167,7 @@ static void xhci_handle_cmd_set_deq(struct xhci_hcd *xhci, int slot_id,
 			xhci_warn(xhci, "Mismatch between completed Set TR Deq "
 					"Ptr command & xHCI internal state.\n");
 			xhci_warn(xhci, "ep deq seg = %p, deq ptr = %p\n",
-					dev->eps[ep_index].queued_deq_seg,
-					dev->eps[ep_index].queued_deq_ptr);
+				  ep->queued_deq_seg, ep->queued_deq_ptr);
 		}
 	}
 
@@ -4074,6 +4090,7 @@ static int queue_set_tr_deq(struct xhci_hcd *xhci, int slot_id,
 	u32 trb_slot_id = SLOT_ID_FOR_TRB(slot_id);
 	u32 trb_ep_index = EP_ID_FOR_TRB(ep_index);
 	u32 trb_stream_id = STREAM_ID_FOR_TRB(stream_id);
+	u32 trb_sct = 0;
 	u32 type = TRB_TYPE(TRB_SET_DEQ);
 	struct xhci_virt_ep *ep;
 
@@ -4092,7 +4109,9 @@ static int queue_set_tr_deq(struct xhci_hcd *xhci, int slot_id,
 	}
 	ep->queued_deq_seg = deq_seg;
 	ep->queued_deq_ptr = deq_ptr;
-	return queue_command(xhci, lower_32_bits(addr) | cycle_state,
+	if (stream_id)
+		trb_sct = SCT_FOR_TRB(SCT_PRI_TR);
+	return queue_command(xhci, lower_32_bits(addr) | trb_sct | cycle_state,
 			upper_32_bits(addr), trb_stream_id,
 			trb_slot_id | trb_ep_index | type, false);
 }
