@@ -399,8 +399,6 @@ static void scsi_device_dev_release_usercontext(struct work_struct *work)
 	/* NULL queue means the device can't be used */
 	sdev->request_queue = NULL;
 
-	scsi_target_reap(scsi_target(sdev));
-
 	kfree(sdev->inquiry);
 	kfree(sdev);
 
@@ -1043,6 +1041,8 @@ void __scsi_remove_device(struct scsi_device *sdev)
 		device_del(dev);
 	} else
 		put_device(&sdev->sdev_dev);
+
+	scsi_target_reap(scsi_target(sdev));
 
 	/*
 	 * Stop accepting new requests and wait until all queuecommand() and
