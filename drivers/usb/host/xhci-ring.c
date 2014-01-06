@@ -2978,7 +2978,7 @@ static int prepare_ring(struct xhci_hcd *xhci, struct xhci_ring *ep_ring,
 			if (num_trbs >= TRBS_PER_SEGMENT) {
 				xhci_err(xhci, "Too many fragments %d, max %d\n",
 						num_trbs, TRBS_PER_SEGMENT - 1);
-				return -ENOMEM;
+				return -EINVAL;
 			}
 			xhci_dbg(xhci, "Insert no-op TRBs at 0x%llx\n",
 					(unsigned long long)
