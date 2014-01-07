@@ -77,11 +77,15 @@ static int usb_port_runtime_resume(struct device *dev)
 	struct usb_device *hdev = to_usb_device(dev->parent->parent);
 	struct usb_interface *intf = to_usb_interface(dev->parent);
 	struct usb_hub *hub = usb_hub_to_struct_hub(hdev);
+	struct usb_port *peer = port_dev->peer;
 	int port1 = port_dev->portnum;
 	int retval;
 
 	if (!hub)
 		return -EINVAL;
+
+	if (!hub_is_superspeed(hdev) && peer)
+		pm_runtime_get_sync(&peer->dev);
 
 	usb_autopm_get_interface(intf);
 	set_bit(port1, hub->busy_bits);
@@ -104,6 +108,10 @@ static int usb_port_runtime_resume(struct device *dev)
 
 	clear_bit(port1, hub->busy_bits);
 	usb_autopm_put_interface(intf);
+
+	if (!hub_is_superspeed(hdev) && peer)
+		pm_runtime_put(&peer->dev);
+
 	return retval;
 }
 
@@ -113,6 +121,7 @@ static int usb_port_runtime_suspend(struct device *dev)
 	struct usb_device *hdev = to_usb_device(dev->parent->parent);
 	struct usb_interface *intf = to_usb_interface(dev->parent);
 	struct usb_hub *hub = usb_hub_to_struct_hub(hdev);
+	struct usb_port *peer = port_dev->peer;
 	int port1 = port_dev->portnum;
 	int retval;
 
@@ -123,6 +132,12 @@ static int usb_port_runtime_suspend(struct device *dev)
 			== PM_QOS_FLAGS_ALL)
 		return -EAGAIN;
 
+	/* block poweroff of superspeed ports while highspeed peer is on */
+	dev_WARN_ONCE(&hdev->dev, hub_is_superspeed(hdev) && !peer,
+		      "port%d missing peer info\n", port1);
+	if (hub_is_superspeed(hdev) && (!peer || peer->power_is_on))
+		return -EBUSY;
+
 	usb_autopm_get_interface(intf);
 	set_bit(port1, hub->busy_bits);
 	retval = usb_hub_set_port_power(hdev, hub, port1, false);
@@ -130,6 +145,13 @@ static int usb_port_runtime_suspend(struct device *dev)
 	usb_clear_port_feature(hdev, port1,	USB_PORT_FEAT_C_ENABLE);
 	clear_bit(port1, hub->busy_bits);
 	usb_autopm_put_interface(intf);
+
+	/* bounce our peer now that we are down */
+	if (!hub_is_superspeed(hdev) && peer) {
+		pm_runtime_get(&peer->dev);
+		pm_runtime_put(&peer->dev);
+	}
+
 	return retval;
 }
 #endif
