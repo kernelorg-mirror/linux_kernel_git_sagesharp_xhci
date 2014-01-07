@@ -993,6 +993,9 @@ void xhci_stop_endpoint_command_watchdog(unsigned long arg)
 	for (i = 0; i < MAX_HC_SLOTS; i++) {
 		if (!xhci->devs[i])
 			continue;
+
+		xhci_dbg(xhci, "Slot %d output context\n", i);
+		xhci_dbg_ctx(xhci, xhci->devs[i]->out_ctx, 30);
 		for (j = 0; j < 31; j++) {
 			temp_ep = &xhci->devs[i]->eps[j];
 			ring = temp_ep->ring;
@@ -1001,6 +1004,10 @@ void xhci_stop_endpoint_command_watchdog(unsigned long arg)
 			xhci_dbg_trace(xhci, trace_xhci_dbg_cancel_urb,
 					"Killing URBs for slot ID %u, "
 					"ep index %u", i, j);
+			xhci_dbg(xhci, "Dev %i Ep 0x%x:\n", i,
+					xhci_get_endpoint_address(j));
+			xhci_debug_ring(xhci, ring);
+			xhci_dbg_ring_ptrs(xhci, ring);
 			while (!list_empty(&ring->td_list)) {
 				cur_td = list_first_entry(&ring->td_list,
 						struct xhci_td,
@@ -1010,12 +1017,6 @@ void xhci_stop_endpoint_command_watchdog(unsigned long arg)
 					list_del_init(&cur_td->cancelled_td_list);
 				xhci_giveback_urb_in_irq(xhci, cur_td,
 						-ESHUTDOWN, "killed");
-			}
-			if (!list_empty(&temp_ep->cancelled_td_list)) {
-				xhci_dbg(xhci, "Dev %i Ep 0x%x:\n", i,
-						xhci_get_endpoint_address(j));
-				xhci_debug_ring(xhci, ring);
-				xhci_dbg_ring_ptrs(xhci, ring);
 			}
 			while (!list_empty(&temp_ep->cancelled_td_list)) {
 				cur_td = list_first_entry(
@@ -2980,10 +2981,10 @@ static int prepare_ring(struct xhci_hcd *xhci, struct xhci_ring *ep_ring,
 						num_trbs, TRBS_PER_SEGMENT - 1);
 				return -EINVAL;
 			}
-			xhci_dbg(xhci, "Insert no-op TRBs at 0x%llx\n",
-					(unsigned long long)
+			xhci_dbg(xhci, "Insert %i no-op TRBs from 0x%llx for TD with %i TRBs\n",
+					usable, (unsigned long long)
 					xhci_trb_virt_to_dma(ep_ring->enq_seg,
-						ep_ring->enqueue));
+						ep_ring->enqueue), num_trbs);
 
 			nop_cmd = cpu_to_le32(TRB_TYPE(TRB_TR_NOOP) |
 					ep_ring->cycle_state);
