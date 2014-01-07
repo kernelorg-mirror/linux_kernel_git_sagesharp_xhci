@@ -67,7 +67,27 @@ static void usb_port_device_release(struct device *dev)
 {
 	struct usb_port *port_dev = to_usb_port(dev);
 
+	flush_work(&port_dev->resume_work);
 	kfree(port_dev);
+}
+
+static void port_dev_wake_child(struct work_struct *w)
+{
+	struct usb_port *port_dev;
+	struct usb_device *udev;
+
+	port_dev = container_of(w, typeof(*port_dev), resume_work);
+	udev = port_dev->child;
+
+	if (udev) {
+#ifdef CONFIG_PM
+		if (udev->persist_enabled)
+			udev->reset_resume = 1;
+#endif
+		usb_autoresume_device(udev);
+		usb_autosuspend_device(udev);
+	}
+	pm_runtime_put_sync(&port_dev->dev);
 }
 
 #ifdef CONFIG_PM_RUNTIME
@@ -110,6 +130,12 @@ static int usb_port_runtime_resume(struct device *dev)
 
 	if (!hub_is_superspeed(hdev) && peer)
 		pm_runtime_put(&peer->dev);
+
+	/* keep this port awake until we have had a chance to recover
+	 * the child
+	 */
+	pm_runtime_get_noresume(&port_dev->dev);
+	schedule_work(&port_dev->resume_work);
 
 	return retval;
 }
@@ -330,6 +356,7 @@ int usb_hub_create_port_device(struct usb_hub *hub, int port1)
 	port_dev->dev.parent = hub->intfdev;
 	port_dev->dev.groups = port_dev_group;
 	port_dev->dev.type = &usb_port_device_type;
+	INIT_WORK(&port_dev->resume_work, port_dev_wake_child);
 	dev_set_name(&port_dev->dev, "port%d", port1);
 	device_initialize(&port_dev->dev);
 

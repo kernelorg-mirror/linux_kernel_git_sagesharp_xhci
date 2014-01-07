@@ -4699,6 +4699,7 @@ static struct usb_port *next_active_port(struct usb_hub *hub, int *port1)
 
 		pm_runtime_get_noresume(&port_dev->dev);
 		pm_runtime_barrier(&port_dev->dev);
+		flush_work(&port_dev->resume_work);
 		if (pm_runtime_active(&port_dev->dev))
 			return port_dev;
 
