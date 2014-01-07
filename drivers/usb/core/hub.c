@@ -4662,6 +4662,34 @@ static void put_port(struct usb_port *port_dev, int *port1)
 	(*port1)++;
 }
 
+static void hub_clear_misc_change(struct usb_hub *hub, int port1,
+				   u16 portstatus, u16 portchange)
+{
+	struct device *hub_dev = hub->intfdev;
+	struct usb_device *hdev = hub->hdev;
+
+	if (portchange & USB_PORT_STAT_C_RESET) {
+		dev_dbg(hub_dev, "reset change on port %d\n", port1);
+		usb_clear_port_feature(hdev, port1, USB_PORT_FEAT_C_RESET);
+	}
+	if ((portchange & USB_PORT_STAT_C_BH_RESET)
+	    && hub_is_superspeed(hdev)) {
+		dev_dbg(hub_dev, "warm reset change on port %d\n", port1);
+		usb_clear_port_feature(hdev, port1,
+				       USB_PORT_FEAT_C_BH_PORT_RESET);
+	}
+	if (portchange & USB_PORT_STAT_C_LINK_STATE) {
+		dev_dbg(hub_dev, "link state change on port %d\n", port1);
+		usb_clear_port_feature(hdev, port1,
+				       USB_PORT_FEAT_C_PORT_LINK_STATE);
+	}
+	if (portchange & USB_PORT_STAT_C_CONFIG_ERROR) {
+		dev_warn(hub_dev, "config error on port %d\n", port1);
+		usb_clear_port_feature(hdev, port1,
+				       USB_PORT_FEAT_C_PORT_CONFIG_ERROR);
+	}
+}
+
 static struct usb_port *next_active_port(struct usb_hub *hub, int *port1)
 {
 	struct usb_device *hdev = hub->hdev;
@@ -4673,6 +4701,19 @@ static struct usb_port *next_active_port(struct usb_hub *hub, int *port1)
 		pm_runtime_barrier(&port_dev->dev);
 		if (pm_runtime_active(&port_dev->dev))
 			return port_dev;
+
+		/* handle out of spec hubs that continue to signal reset and
+		 * link-state change events while the port is powered-off
+		 */
+		if (test_bit(*port1, hub->event_bits)) {
+			u16 stat, change;
+			int ret;
+
+			ret = hub_port_status(hub, *port1, &stat, &change);
+			if (ret == 0)
+				hub_clear_misc_change(hub, *port1, stat,
+						      change);
+		}
 		put_port(port_dev, port1);
 	}
 
@@ -4834,32 +4875,7 @@ static void hub_events(void)
 						"condition on port %d\n", i);
 			}
 
-			if (portchange & USB_PORT_STAT_C_RESET) {
-				dev_dbg (hub_dev,
-					"reset change on port %d\n",
-					i);
-				usb_clear_port_feature(hdev, i,
-					USB_PORT_FEAT_C_RESET);
-			}
-			if ((portchange & USB_PORT_STAT_C_BH_RESET) &&
-					hub_is_superspeed(hub->hdev)) {
-				dev_dbg(hub_dev,
-					"warm reset change on port %d\n",
-					i);
-				usb_clear_port_feature(hdev, i,
-					USB_PORT_FEAT_C_BH_PORT_RESET);
-			}
-			if (portchange & USB_PORT_STAT_C_LINK_STATE) {
-				usb_clear_port_feature(hub->hdev, i,
-						USB_PORT_FEAT_C_PORT_LINK_STATE);
-			}
-			if (portchange & USB_PORT_STAT_C_CONFIG_ERROR) {
-				dev_warn(hub_dev,
-					"config error on port %d\n",
-					i);
-				usb_clear_port_feature(hub->hdev, i,
-						USB_PORT_FEAT_C_PORT_CONFIG_ERROR);
-			}
+			hub_clear_misc_change(hub, i, portstatus, portchange);
 
 			/* Warm reset a USB3 protocol port if it's in
 			 * SS.Inactive state.
