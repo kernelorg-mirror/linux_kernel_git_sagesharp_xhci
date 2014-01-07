@@ -5,6 +5,25 @@
 			    October 28, 2010
 
 
+	Contents:
+	---------
+	* What is Power Management?
+	* What is Remote Wakeup?
+	* When is a USB device idle?
+	* Forms of dynamic PM
+	* The user interface for dynamic PM
+	* Changing the default idle-delay time
+	* Warnings
+	* The driver interface for Power Management
+	* The driver interface for autosuspend and autoresume
+	* Other parts of the driver interface
+	* Mutual exclusion
+	* Interaction between dynamic PM and system PM
+	* xHCI hardware link PM
+	* USB Port Power Control
+	* User Interface for Port Power Control
+	* Suggested Userspace Port Power Policy
+
 
 	What is Power Management?
 	-------------------------
@@ -516,3 +535,194 @@ relevant attribute files is usb2_hardware_lpm.
 		driver will enable hardware LPM	for the device. You
 		can write y/Y/1 or n/N/0 to the file to	enable/disable
 		USB2 hardware LPM manually. This is for	test purpose mainly.
+
+
+	USB Port Power Control
+	----------------------
+
+In addition to suspending endpoint devices and enabling hardware
+controlled link power management, the USB subsystem also has the
+capability to disable power to individual ports.  Power is controlled
+through Set/ClearPortFeature(PORT_POWER) requests to a hub.  In the case
+of a root or platform-internal hub the host controller driver translates
+PORT_POWER requests into platform firmware (ACPI) method calls to set
+the port power state. For more background see the Linux Plumbers
+Conference 2012 slides [1] and video [2]:
+
+Upon receiving a ClearPortFeature(PORT_POWER) request a USB port is
+logically off, and may trigger the actual loss of VBUS to the port [3].
+VBUS may be maintained in the case where a hub gangs multiple ports into
+a shared power well causing power to remain until all ports in the gang
+are turned off.  VBUS may also be maintained by hub ports configured for
+a charging application.  In any event a logically off port will lose
+connection with its device, not respond to hotplug events, and not
+respond to remote wakeup events*.
+
+WARNING: turning off a port may result in the inability to hot add a device.
+Please see "User Interface for Port Power Control" for details.
+
+As far as the effect on the device itself it is similar to what a device
+goes through during system suspend, i.e. the power session is lost.  Any
+USB device or driver that misbehaves with system suspend will be
+similarly affected by a port power cycle event.  For this reason the
+implementation shares the same device recovery path (and honors the same
+quirks) as the system resume path for the hub.
+
+[1]: http://dl.dropbox.com/u/96820575/sarah-sharp-lpt-port-power-off2-mini.pdf
+[2]: http://linuxplumbers.ubicast.tv/videos/usb-port-power-off-kerneluserspace-api/
+[3]: USB 3.1 Section 10.12
+* wakeup note: the implementation does not allow a port connected to a
+  device with wakeup capability to be powered off.
+
+
+	User Interface for Port Power Control
+	-------------------------------------
+
+The port power control mechanism uses the PM runtime system.  Poweroff is
+requested by clearing the power/pm_qos_no_power_off flag of the port device
+(defaults to 1).  If the port is disconnected it will immediately receive a
+ClearPortFeature(PORT_POWER) request.  Otherwise, it will honor the pm runtime
+rules and requrire the attached child device and all descendants to be
+suspended.
+
+Note, some interface devices/drivers do not support autosuspend.  Userspace may
+need to unbind the interface drivers before the usb_device will suspend.  An
+unbound interface device is suspended by default.
+
+Example of the relevant files for port power control.
+
+                       child device link +
+                       port device +     |
+                parent hub +       |     |
+                           v       v     v
+     /sys/bus/devices/usb2/2-0:1.0/port1/device
+
+     /sys/bus/devices/usb2/2-0:1.0/port1/power/pm_qos_no_power_off
+     /sys/bus/devices/usb2/2-0:1.0/port1/device/power/control
+     /sys/bus/devices/usb2/2-0:1.0/port1/device/<intf>/driver/unbind
+
+In addition to these files some ports may have a 'peer' link to a port on
+another hub.  The expectation is that all superspeed ports have a
+hi-speed peer.
+
+/sys/bus/usb/devices/usb2/2-0:1.0/port1/peer -> ../../../usb3/3-0:1.0/port1
+/sys/bus/usb/devices/usb3/3-0:1.0/port1/peer -> ../../../usb2/2-0:1.0/port1
+
+Physically, a superspeed port is ganged with a hi-speed port to form a
+connector.  Distinct from 'companion ports', peer ports share the same
+ancestor XHCI device.  Whereas, with a companion port, an EHCI or XHCI
+device optionally drive the same pins.  While a superspeed port is
+powered off a device may downgrade its connection and attempt to connect
+to the hi-speed pins.  The implementation takes steps to prevent this
+and sequences port power to guarantee that hi-speed ports are
+powered-off before superspeed are allowed to suspend, and that
+superspeed ports are recovered/repowered before hi-speed.
+
+	power/pm_qos_no_power_off:
+		This writable flag controls the state of an idle port.
+		Once all children and descendants have suspended the
+		port may suspend/poweroff provided that
+		pm_qos_no_power_off is '0'.  If pm_qos_no_power_off is
+		'1' the port will remain active/powered regardless of
+		the stats of descendants.
+
+	power/runtime_status:
+		This file reflects whether the port is 'active' (power is on)
+		or 'suspended' (logically off).  There is no indication to
+		userspace whether VBUS is still supplied.
+
+	connect_type:
+		An advisory read-only flag to userspace indicating the
+		location and connection type of the port.  It returns
+		one of four values 'hotplug', 'hardwired', 'not used',
+		and 'unknown'.  All values, besides unknown, are set by
+		platform firmware.
+
+		"hotplug" indicates an externally connectable/visible
+		port on the platform.  Typically userspace would choose
+		to keep such a port powered to handle new device
+		connection events.
+
+		"hardwired" refers to a port that is not visible but
+		connectable. Examples are internal ports for USB
+		bluetooth that can be disconnected via an external
+		switch or a port with a hardwired USB camera.  It is
+		expected to be safe to allow these ports to suspend
+		provided pm_qos_no_power_off is coordinated with any
+		switch that gates connections.  Userspace must arrange
+		for the device to be connected prior to the port
+		powering off, or to activate the port prior to enabling
+		connection via a switch.
+
+		"not used" refers to an internal port that is expected
+		to never have a device connected to it.  These may be
+		empty internal ports, or ports that are not physically
+		exposed on a platform.  Considered safe to be
+		powered-off at all times.
+
+		"unknown" means platform firmware does not provide
+		information for this port.  Most commonly refers to
+		external hub ports which should be considered 'hotplug'
+		for policy decisions.
+
+		NOTE1: since we are relying on the BIOS to get this ACPI
+		information correct, the USB port descriptions may be
+		missing or wrong.
+
+		NOTE2: Take care in clearing pm_qos_no_power_off.  Once
+		power is off this port will
+		not respond to new connect events.
+
+	Once a child device is attached additional constraints are
+	applied before the port is allowed to poweroff.
+
+	<child>/power/control:
+		Must be 'auto', and the port will not
+		power down until <child>/power/runtime_status
+		reflects the 'suspended' state.  Default
+		value is controlled by child device driver.
+
+	<child>/power/persist:
+		This defaults to '1' for most devices and indicates if
+		kernel can persist the device's configuration across a
+		power session loss (suspend / port-power event).  When
+		this value is '0' (quirky devices), port poweroff is
+		disabled.
+
+	<child>/driver/unbind:
+		Wakeup capable devices will block port poweroff.  At
+		this time the only mechanism to clear the usb-internal
+		wakeup-capabilty for an interface device is to unbind
+		its driver.
+
+Summary of poweroff pre-requisite settings relative to a port device:
+
+	echo 0 > power/pm_qos_no_power_off
+	echo 0 > peer/power/pm_qos_no_power_off # if it exists
+	echo auto > power/control # this is the default value
+	echo auto > <child>/power/control
+	echo 1 > <child>/power/persist # this is the default value
+
+	Suggested Userspace Port Power Policy
+	-------------------------------------
+
+As noted above userspace needs to be careful and deliberate about what
+ports are enabled for poweroff.
+
+The default configuration is that all ports start with
+power/pm_qos_no_power_off set to '1' causing ports to always remain
+active.
+
+Given confidence in the platform firmware's description of the ports
+(ACPI _PLD record for a port populates 'connect_type') userspace can
+clear pm_qos_no_power_off for all 'not used' ports.  The same can be
+done for 'hardwired' ports provided poweroff is coordinated with any
+connection switch for the port.
+
+A more aggressive userspace policy is to enable USB port power off
+for all ports (set portX/power/pm_qos_no_power_off to '0' and set
+portX/connect_type to 'hardwired') when some external factor indicates
+the user has stopped interacting with the system.  For example, a distro
+may want to enable power off all USB ports when the screen blanks, and
+re-power them when the screen becomes active.  Smart phones and tablets
+may want to power off USB ports when the user pushes the power button.
