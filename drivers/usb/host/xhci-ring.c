@@ -1502,6 +1502,7 @@ static void handle_cmd_completion(struct xhci_hcd *xhci,
 	dma_addr_t cmd_dequeue_dma;
 	u32 cmd_comp_code;
 	union xhci_trb *cmd_trb;
+	struct xhci_command *cmd;
 	u32 cmd_type;
 
 	cmd_dma = le64_to_cpu(event->cmd_trb);
@@ -1519,6 +1520,13 @@ static void handle_cmd_completion(struct xhci_hcd *xhci,
 		return;
 	}
 
+	cmd = list_entry(xhci->cmd_list.next, struct xhci_command, cmd_list);
+
+	if (cmd->command_trb != xhci->cmd_ring->dequeue) {
+		xhci_err(xhci,
+			 "Command completion event does not match command\n");
+		return;
+	}
 	trace_xhci_cmd_completion(cmd_trb, (struct xhci_generic_trb *) event);
 
 	cmd_comp_code = GET_COMP_CODE(le32_to_cpu(event->status));
@@ -1588,6 +1596,9 @@ static void handle_cmd_completion(struct xhci_hcd *xhci,
 		xhci->error_bitmask |= 1 << 6;
 		break;
 	}
+
+	list_del(&cmd->cmd_list);
+
 	inc_deq(xhci, xhci->cmd_ring);
 }
 
@@ -4039,7 +4050,7 @@ static int queue_command(struct xhci_hcd *xhci, struct xhci_command *cmd,
 		return ret;
 	}
 	cmd->command_trb = xhci->cmd_ring->enqueue;
-
+	list_add_tail(&cmd->cmd_list, &xhci->cmd_list);
 	queue_trb(xhci, xhci->cmd_ring, false, field1, field2, field3,
 			field4 | xhci->cmd_ring->cycle_state);
 	return 0;

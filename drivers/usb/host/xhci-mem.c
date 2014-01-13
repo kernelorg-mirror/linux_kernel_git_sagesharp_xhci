@@ -1694,6 +1694,7 @@ void xhci_mem_cleanup(struct xhci_hcd *xhci)
 {
 	struct pci_dev	*pdev = to_pci_dev(xhci_to_hcd(xhci)->self.controller);
 	struct xhci_cd  *cur_cd, *next_cd;
+	struct xhci_command *cur_cmd, *next_cmd;
 	int size;
 	int i, j, num_ports;
 
@@ -1720,6 +1721,12 @@ void xhci_mem_cleanup(struct xhci_hcd *xhci)
 			&xhci->cancel_cmd_list, cancel_cmd_list) {
 		list_del(&cur_cd->cancel_cmd_list);
 		kfree(cur_cd);
+	}
+
+	list_for_each_entry_safe(cur_cmd, next_cmd,
+			&xhci->cmd_list, cmd_list) {
+		list_del(&cur_cmd->cmd_list);
+		kfree(cur_cmd);
 	}
 
 	for (i = 1; i < MAX_HC_SLOTS; ++i)
@@ -2223,6 +2230,7 @@ int xhci_mem_init(struct xhci_hcd *xhci, gfp_t flags)
 	int i;
 
 	INIT_LIST_HEAD(&xhci->cancel_cmd_list);
+	INIT_LIST_HEAD(&xhci->cmd_list);
 
 	page_size = xhci_readl(xhci, &xhci->op_regs->page_size);
 	xhci_dbg_trace(xhci, trace_xhci_dbg_init,
