@@ -1180,12 +1180,15 @@ static void xhci_handle_cmd_reset_ep(struct xhci_hcd *xhci, int slot_id,
 	 * because the HW can't handle two commands being queued in a row.
 	 */
 	if (xhci->quirks & XHCI_RESET_EP_QUIRK) {
+		struct xhci_command *command;
+		command = xhci_alloc_command(xhci, false, false, GFP_ATOMIC);
 		xhci_dbg_trace(xhci, trace_xhci_dbg_quirks,
 				"Queueing configure endpoint command");
 		xhci_queue_configure_endpoint(xhci,
 				xhci->devs[slot_id]->in_ctx->dma, slot_id,
 				false);
 		xhci_ring_cmd_db(xhci);
+		kfree(command);
 	} else {
 		/* Clear our internal halted state and restart the ring(s) */
 		xhci->devs[slot_id]->eps[ep_index].ep_state &= ~EP_HALTED;
@@ -1439,7 +1442,7 @@ static void xhci_handle_cmd_config_ep(struct xhci_hcd *xhci, int slot_id,
 			add_flags - SLOT_FLAG == drop_flags) {
 		ep_state = virt_dev->eps[ep_index].ep_state;
 		if (!(ep_state & EP_HALTED))
-			goto bandwidth_change;
+			return;
 		xhci_dbg_trace(xhci, trace_xhci_dbg_quirks,
 				"Completed config ep cmd - "
 				"last ep index = %d, state = %d",
@@ -1449,11 +1452,6 @@ static void xhci_handle_cmd_config_ep(struct xhci_hcd *xhci, int slot_id,
 		ring_doorbell_for_active_rings(xhci, slot_id, ep_index);
 		return;
 	}
-bandwidth_change:
-	xhci_dbg_trace(xhci,  trace_xhci_dbg_context_change,
-			"Completed config ep cmd");
-	virt_dev->cmd_status = cmd_comp_code;
-	complete(&virt_dev->cmd_completion);
 	return;
 }
 
