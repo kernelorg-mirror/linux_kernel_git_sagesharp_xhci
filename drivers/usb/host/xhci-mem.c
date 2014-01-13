@@ -1692,7 +1692,6 @@ void xhci_free_command(struct xhci_hcd *xhci,
 void xhci_mem_cleanup(struct xhci_hcd *xhci)
 {
 	struct pci_dev	*pdev = to_pci_dev(xhci_to_hcd(xhci)->self.controller);
-	struct xhci_cd  *cur_cd, *next_cd;
 	struct xhci_command *cur_cmd, *next_cmd;
 	int size;
 	int i, j, num_ports;
@@ -1712,15 +1711,13 @@ void xhci_mem_cleanup(struct xhci_hcd *xhci)
 	if (xhci->lpm_command)
 		xhci_free_command(xhci, xhci->lpm_command);
 	xhci->cmd_ring_reserved_trbs = 0;
+
+	del_timer_sync(&xhci->cmd_timer);
+
 	if (xhci->cmd_ring)
 		xhci_ring_free(xhci, xhci->cmd_ring);
 	xhci->cmd_ring = NULL;
 	xhci_dbg_trace(xhci, trace_xhci_dbg_init, "Freed command ring");
-	list_for_each_entry_safe(cur_cd, next_cd,
-			&xhci->cancel_cmd_list, cancel_cmd_list) {
-		list_del(&cur_cd->cancel_cmd_list);
-		kfree(cur_cd);
-	}
 
 	list_for_each_entry_safe(cur_cmd, next_cmd,
 			&xhci->cmd_list, cmd_list) {
@@ -2228,7 +2225,6 @@ int xhci_mem_init(struct xhci_hcd *xhci, gfp_t flags)
 	u32 page_size, temp;
 	int i;
 
-	INIT_LIST_HEAD(&xhci->cancel_cmd_list);
 	INIT_LIST_HEAD(&xhci->cmd_list);
 
 	page_size = xhci_readl(xhci, &xhci->op_regs->page_size);
@@ -2413,6 +2409,11 @@ int xhci_mem_init(struct xhci_hcd *xhci, gfp_t flags)
 	xhci_dbg_trace(xhci, trace_xhci_dbg_init,
 			"Wrote ERST address to ir_set 0.");
 	xhci_print_ir_set(xhci, 0);
+
+	/* init command timeout timer */
+	init_timer(&xhci->cmd_timer);
+	xhci->cmd_timer.data = (unsigned long) xhci;
+	xhci->cmd_timer.function = xhci_handle_command_timeout;
 
 	/*
 	 * XXX: Might need to set the Interrupter Moderation Register to
