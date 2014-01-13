@@ -2906,6 +2906,7 @@ void xhci_endpoint_reset(struct usb_hcd *hcd,
 	unsigned long flags;
 	int ret;
 	struct xhci_virt_ep *virt_ep;
+	struct xhci_command *command;
 
 	xhci = hcd_to_xhci(hcd);
 	udev = (struct usb_device *) ep->hcpriv;
@@ -2928,6 +2929,10 @@ void xhci_endpoint_reset(struct usb_hcd *hcd,
 		return;
 	}
 
+	command = xhci_alloc_command(xhci, false, false, GFP_ATOMIC);
+	if (!command)
+		return;
+
 	xhci_dbg_trace(xhci, trace_xhci_dbg_reset_ep,
 			"Queueing reset endpoint command");
 	spin_lock_irqsave(&xhci->lock, flags);
@@ -2946,6 +2951,7 @@ void xhci_endpoint_reset(struct usb_hcd *hcd,
 	virt_ep->stopped_trb = NULL;
 	virt_ep->stopped_stream = 0;
 	spin_unlock_irqrestore(&xhci->lock, flags);
+	kfree(command);
 
 	if (ret)
 		xhci_warn(xhci, "FIXME allocate a new ring segment\n");

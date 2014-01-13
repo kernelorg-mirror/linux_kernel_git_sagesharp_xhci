@@ -1913,6 +1913,10 @@ static void xhci_cleanup_halted_endpoint(struct xhci_hcd *xhci,
 		struct xhci_td *td, union xhci_trb *event_trb)
 {
 	struct xhci_virt_ep *ep = &xhci->devs[slot_id]->eps[ep_index];
+	struct xhci_command *command;
+	command = xhci_alloc_command(xhci, false, false, GFP_ATOMIC);
+	if (!command)
+		return;
 	ep->ep_state |= EP_HALTED;
 	ep->stopped_td = td;
 	ep->stopped_trb = event_trb;
@@ -1926,6 +1930,7 @@ static void xhci_cleanup_halted_endpoint(struct xhci_hcd *xhci,
 	ep->stopped_stream = 0;
 
 	xhci_ring_cmd_db(xhci);
+	kfree(command);
 }
 
 /* Check if an error has halted the endpoint ring.  The class driver will
