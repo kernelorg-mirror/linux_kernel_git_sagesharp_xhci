@@ -855,11 +855,14 @@ remove_finished_td:
 
 	/* If necessary, queue a Set Transfer Ring Dequeue Pointer command */
 	if (deq_state.new_deq_ptr && deq_state.new_deq_seg) {
+		struct xhci_command *command;
+		command = xhci_alloc_command(xhci, false, false, GFP_ATOMIC);
 		xhci_queue_new_dequeue_state(xhci,
 				slot_id, ep_index,
 				ep->stopped_td->urb->stream_id,
 				&deq_state);
 		xhci_ring_cmd_db(xhci);
+		kfree(command);
 	} else {
 		/* Otherwise ring the doorbell(s) to restart queued transfers */
 		ring_doorbell_for_active_rings(xhci, slot_id, ep_index);
