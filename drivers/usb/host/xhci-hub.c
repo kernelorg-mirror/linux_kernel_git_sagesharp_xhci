@@ -292,14 +292,14 @@ static int xhci_stop_device(struct xhci_hcd *xhci, int slot_id, int suspend)
 			if (!command) {
 				xhci_free_command(xhci, cmd);
 				return -ENOMEM;
+
 			}
-			xhci_queue_stop_endpoint(xhci, slot_id, i, suspend);
-			kfree(command);
+			xhci_queue_stop_endpoint(xhci, command, slot_id, i,
+						 suspend);
 		}
 	}
-	cmd->command_trb = xhci_find_next_enqueue(xhci->cmd_ring);
 	list_add_tail(&cmd->cmd_list, &virt_dev->cmd_list);
-	xhci_queue_stop_endpoint(xhci, slot_id, 0, suspend);
+	xhci_queue_stop_endpoint(xhci, cmd, slot_id, 0, suspend);
 	xhci_ring_cmd_db(xhci);
 	spin_unlock_irqrestore(&xhci->lock, flags);
 
