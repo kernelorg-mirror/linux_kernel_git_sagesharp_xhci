@@ -3651,7 +3651,8 @@ static void usb_enable_link_state(struct usb_hcd *hcd, struct usb_device *udev,
 
 	/* Only a configured device will accept the Set Feature U1/U2_ENABLE */
 	else if (udev->actconfig)
-		usb_set_device_initiated_lpm(udev, state, true);
+		if (usb_set_device_initiated_lpm(udev, state, true))
+			hcd->driver->disable_usb3_lpm_timeout(hcd, udev, state);
 
 }
 
