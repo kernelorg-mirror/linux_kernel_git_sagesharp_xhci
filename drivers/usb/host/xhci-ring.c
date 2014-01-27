@@ -2971,6 +2971,8 @@ static int prepare_ring(struct xhci_hcd *xhci, struct xhci_ring *ep_ring,
 					TRBS_PER_SEGMENT - 1 - trb;
 			u32 nop_cmd;
 
+			if (xhci->hci_version < 0x100)
+				break;
 			/*
 			 * Section 4.11.7.1 TD Fragments states that a link
 			 * TRB must only occur at the boundary between
